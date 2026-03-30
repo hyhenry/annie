@@ -23,7 +23,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Any, Dict, List, Optional
 
 import config
-from taapi_client import fetch_indicators
+from taapi_client import fetch_indicators, TaapiPlanError
 from indicators import parse_indicators, IndicatorData
 from scoring import score_ticker, ScoringResult
 from risk import build_trade_plan, TradePlan
@@ -162,6 +162,27 @@ def analyze_ticker(
         logger.debug("%s: fetching %s indicators", ticker, primary)
         daily_raw = fetch_indicators(ticker, primary)
 
+        # Fast-fail if the plan doesn't cover US stocks — no point fetching more
+        if "plan_restriction" in daily_raw.fetch_errors:
+            return StockReport(
+                ticker=ticker,
+                score=0.0,
+                recommendation="Avoid",
+                confidence=0.0,
+                factor_scores={},
+                indicators={},
+                trade_plan=None,
+                risk_note="",
+                explanation=(
+                    "Could not analyse: your TAAPI plan does not support US stocks. "
+                    "The free tier only covers crypto (BTC/USDT etc.). "
+                    "Upgrade at https://taapi.io/pricing/ or enable Mock Mode."
+                ),
+                filters_passed=False,
+                filter_failures=["plan_restriction"],
+                error="plan_restriction",
+            )
+
         # ── Step 2: Fetch secondary timeframe data ────────────────────────
         logger.debug("%s: fetching %s indicators", ticker, secondary)
         h4_raw = fetch_indicators(ticker, secondary)
@@ -261,6 +282,7 @@ def run_engine(
     )
 
     reports: List[StockReport] = []
+    _plan_error_msg: Optional[str] = None
 
     for i, ticker in enumerate(tickers, 1):
         if verbose:
@@ -271,6 +293,17 @@ def run_engine(
 
         if verbose:
             _log_report_summary(report)
+
+        # If this ticker hit a plan restriction, all remaining tickers will too.
+        # Abort early instead of wasting API credits / rate-limit budget.
+        if report.error and "plan_restriction" in (report.filter_failures or []):
+            _plan_error_msg = (
+                "TAAPI plan does not support US stocks — aborting scan. "
+                "The free tier is limited to crypto only. "
+                "Upgrade at https://taapi.io/pricing/ or run with --mock / MOCK_MODE=true."
+            )
+            logger.error(_plan_error_msg)
+            break
 
     # Sort by score descending — best opportunities first
     # Tie-break: confidence descending (more certain results ranked higher)

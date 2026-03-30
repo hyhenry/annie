@@ -341,6 +341,19 @@ def _taapi_symbol(ticker: str) -> str:
     return f"{ticker}{config.TAAPI_SYMBOL_SUFFIX}"
 
 
+class TaapiPlanError(Exception):
+    """
+    Raised when TAAPI rejects a request because the API key's plan does not
+    support US stocks.
+
+    TAAPI free tier only covers crypto (Binance pairs). US stocks require at
+    least a Basic paid plan. When this error is raised, the caller should
+    stop making further API calls for the same ticker — they will all fail
+    with the same 403 response.
+    """
+    pass
+
+
 def _get_indicator(
     endpoint: str,
     ticker: str,
@@ -352,6 +365,10 @@ def _get_indicator(
 
     Returns the parsed JSON response dict, or None if the call failed
     after all retries.
+
+    Raises:
+        TaapiPlanError — if the API key's plan does not allow US stocks.
+                         The caller should abort further calls for this ticker.
 
     Args:
         endpoint:     TAAPI endpoint name, e.g. "rsi", "macd", "bbands"
@@ -377,12 +394,30 @@ def _get_indicator(
         resp = _get_session().get(url, params=params, timeout=config.TAAPI_TIMEOUT_SECONDS)
         if resp.status_code == 200:
             return resp.json()
+        elif resp.status_code == 403:
+            # Check whether this is a plan restriction (not just an auth error)
+            body = resp.text
+            if "Free plans only permits" in body or "plan" in body.lower():
+                raise TaapiPlanError(
+                    "Your TAAPI plan does not support US stocks. "
+                    "The free tier only covers crypto (BTC/USDT, ETH/USDT, etc.). "
+                    "Upgrade to a Basic or higher plan at https://taapi.io/pricing/ "
+                    "to scan US equities, or run with --mock / MOCK_MODE=true to use "
+                    "built-in sample data without an API key."
+                )
+            logger.warning(
+                "TAAPI %s returned HTTP 403 for %s/%s: %s",
+                endpoint, ticker, interval, body[:200],
+            )
+            return None
         else:
             logger.warning(
                 "TAAPI %s returned HTTP %d for %s/%s: %s",
                 endpoint, resp.status_code, ticker, interval, resp.text[:200]
             )
             return None
+    except TaapiPlanError:
+        raise  # propagate — do not swallow
     except requests.exceptions.Timeout:
         logger.warning("TAAPI timeout: %s for %s/%s", endpoint, ticker, interval)
         return None
@@ -399,10 +434,14 @@ def _fetch_free_tier(ticker: str, interval: str) -> RawIndicatorBundle:
     """
     Fetch all indicators using individual TAAPI GET endpoints.
     Suitable for free-tier accounts. Makes ~10 HTTP calls per stock per timeframe.
+
+    If TAAPI rejects the first call with a plan-restriction 403, a TaapiPlanError
+    is raised immediately so the caller can abort all remaining calls for this ticker.
     """
     bundle = RawIndicatorBundle(ticker=ticker, interval=interval)
 
     # ── RSI ──────────────────────────────────────────────────────────────────
+    # TaapiPlanError propagates up — no need to catch here
     data = _get_indicator("rsi", ticker, interval)
     if data and "value" in data:
         bundle.rsi = float(data["value"])
@@ -642,6 +681,8 @@ def fetch_indicators(ticker: str, interval: str) -> RawIndicatorBundle:
     Returns:
         RawIndicatorBundle with all available indicator values.
         Never raises — any failures are recorded in bundle.fetch_errors.
+        If the API key lacks permission for US stocks, fetch_errors will contain
+        "plan_restriction" and the error message will explain the upgrade path.
     """
     ticker = ticker.upper().strip()
 
@@ -659,12 +700,24 @@ def fetch_indicators(ticker: str, interval: str) -> RawIndicatorBundle:
             fetch_errors=["no_api_key"]
         )
 
-    if config.USE_BULK_API:
-        logger.debug("Bulk mode: fetching all indicators for %s/%s", ticker, interval)
-        return _fetch_bulk(ticker, interval)
+    try:
+        if config.USE_BULK_API:
+            logger.debug("Bulk mode: fetching all indicators for %s/%s", ticker, interval)
+            return _fetch_bulk(ticker, interval)
 
-    logger.debug("Free-tier mode: fetching indicators one by one for %s/%s", ticker, interval)
-    return _fetch_free_tier(ticker, interval)
+        logger.debug("Free-tier mode: fetching indicators one by one for %s/%s", ticker, interval)
+        return _fetch_free_tier(ticker, interval)
+
+    except TaapiPlanError as exc:
+        logger.error(
+            "Plan restriction for %s/%s — stopping all calls for this ticker. %s",
+            ticker, interval, exc,
+        )
+        return RawIndicatorBundle(
+            ticker=ticker,
+            interval=interval,
+            fetch_errors=["plan_restriction"],
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

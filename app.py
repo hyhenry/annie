@@ -110,6 +110,33 @@ _init_state()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _check_plan_restriction(results) -> None:
+    """
+    Show a clear error banner if any result indicates a TAAPI plan restriction.
+    The free tier only covers crypto — US stocks require a paid plan.
+    """
+    if not results:
+        return
+    hit = any(
+        r.error == "plan_restriction" or "plan_restriction" in (r.filter_failures or [])
+        for r in results
+    )
+    if hit:
+        st.error(
+            "**TAAPI plan does not support US stocks.**\n\n"
+            "The free tier is limited to crypto (BTC/USDT, ETH/USDT, etc.) on Binance. "
+            "To scan US equities you need a paid plan.\n\n"
+            "**Options:**\n"
+            "- Enable **Mock Mode** (toggle in sidebar) to explore with built-in sample data — no API key needed.\n"
+            "- Upgrade your TAAPI plan at [taapi.io/pricing](https://taapi.io/pricing/).",
+            icon="🔒",
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -180,7 +207,14 @@ def _run_portfolio_analysis():
             st.session_state.last_portfolio_run = datetime.now().strftime("%H:%M:%S")
             st.session_state.error              = None
         except Exception as exc:
-            st.session_state.error = str(exc)
+            err = str(exc)
+            if "plan" in err.lower() or "free tier" in err.lower() or "taapi" in err.lower():
+                err = (
+                    "**TAAPI plan does not support US stocks.** "
+                    "Enable **Mock Mode** in the sidebar, or upgrade your plan at "
+                    "[taapi.io/pricing](https://taapi.io/pricing/)."
+                )
+            st.session_state.error = err
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -475,6 +509,7 @@ def render_scanner_tab():
                 results = run_engine(raw_tickers, verbose=False)
                 st.session_state.scan_results       = results
                 st.session_state.last_scan_run      = datetime.now().strftime("%H:%M:%S")
+                _check_plan_restriction(results)
 
     # ── Scan all TAAPI symbols ────────────────────────────────────────────────
     if scan_all:
@@ -497,6 +532,7 @@ def render_scanner_tab():
             results = run_engine(all_tickers, verbose=False)
             st.session_state.scan_results  = results
             st.session_state.last_scan_run = datetime.now().strftime("%H:%M:%S")
+            _check_plan_restriction(results)
 
     results = st.session_state.scan_results
     if results is None:

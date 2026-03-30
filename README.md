@@ -23,6 +23,20 @@ python main.py --mock --verbose
 MOCK_MODE=true streamlit run app.py
 ```
 
+## TAAPI Plan Requirements
+
+> **The free TAAPI tier does not support US stocks.** It is limited to crypto pairs (BTC/USDT etc.) on Binance.
+
+To scan US equities with live data you need a **Basic plan or higher** from [taapi.io/pricing](https://taapi.io/pricing/).
+
+| Mode | API Key | Works for US stocks? |
+|---|---|---|
+| Mock (`--mock` / `MOCK_MODE=true`) | Not required | Yes — built-in sample data |
+| Live, free tier | Required | **No** — crypto only |
+| Live, Basic plan+ | Required | **Yes** |
+
+The engine handles this gracefully: if your key is rejected for a US stock, it stops immediately (no wasted API calls) and shows a clear error pointing to the upgrade path.
+
 ## Setup with a Real API Key
 
 ```bash
@@ -30,8 +44,6 @@ cp .env.example .env
 # Edit .env and set TAAPI_SECRET=your_key_here
 streamlit run app.py
 ```
-
-Sign up for a free TAAPI key at [taapi.io](https://taapi.io) — no credit card required.
 
 ## Project Structure
 

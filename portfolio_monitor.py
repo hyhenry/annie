@@ -131,7 +131,16 @@ def monitor_holding(
     try:
         # ── Step 1: Fetch indicator data ──────────────────────────────────
         daily_raw = fetch_indicators(ticker, primary)
-        h4_raw    = fetch_indicators(ticker, secondary)
+
+        # Fast-fail if the plan doesn't cover US stocks
+        if "plan_restriction" in daily_raw.fetch_errors:
+            raise RuntimeError(
+                "Your TAAPI plan does not support US stocks. "
+                "The free tier only covers crypto. "
+                "Upgrade at https://taapi.io/pricing/ or enable Mock Mode."
+            )
+
+        h4_raw = fetch_indicators(ticker, secondary)
 
         daily = parse_indicators(daily_raw)
         h4    = parse_indicators(h4_raw)
