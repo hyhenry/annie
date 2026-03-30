@@ -4,7 +4,17 @@
 # Install with: pip install -r requirements.txt
 # Requires Python 3.9+
 
-# HTTP client — used to call the TAAPI.io API
+# ── Market data (default path — no API key required) ──────────────────────────
+
+# Yahoo Finance data fetcher — downloads OHLCV history for any US stock, free
+yfinance>=0.2.40
+
+# Technical indicator library — computes RSI, MACD, BB, Stoch, ATR, ADX, OBV, etc.
+ta>=0.11.0
+
+# ── Core ──────────────────────────────────────────────────────────────────────
+
+# HTTP client — used to call the TAAPI.io API (only needed if DATA_SOURCE=taapi)
 requests==2.31.0
 
 # Loads environment variables from a .env file into os.environ
@@ -15,6 +25,8 @@ streamlit>=1.28.0
 
 # Pandas — used by Streamlit for DataFrames and table display
 pandas>=2.0.0
+
+# ── Testing ───────────────────────────────────────────────────────────────────
 
 # Test runner
 pytest==7.4.3

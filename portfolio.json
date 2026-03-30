@@ -1,51 +1,7 @@
 {
   "account_size": 50000.0,
-  "last_updated": "2026-03-29T21:24:32",
+  "last_updated": "2026-03-30T15:36:44",
   "holdings": [
-    {
-      "ticker": "AAPL",
-      "shares": 100.0,
-      "avg_cost": 170.0,
-      "entry_date": "2024-06-15",
-      "thesis": "Strong AI integration across all product lines, services revenue growing at 15%+ annually. Technical breakout above the $180 resistance level confirmed by volume.",
-      "stop_loss": null,
-      "take_profit": 210.0,
-      "peak_price": 195.0,
-      "trailing_stop_pct": 0.08
-    },
-    {
-      "ticker": "MSFT",
-      "shares": 50.0,
-      "avg_cost": 400.0,
-      "entry_date": "2024-08-20",
-      "thesis": "Azure AI cloud momentum. Copilot adoption accelerating across enterprise customers. Structural long-term winner in enterprise software.",
-      "stop_loss": null,
-      "take_profit": 450.0,
-      "peak_price": 422.0,
-      "trailing_stop_pct": 0.07
-    },
-    {
-      "ticker": "NVDA",
-      "shares": 10.0,
-      "avg_cost": 750.0,
-      "entry_date": "2024-04-10",
-      "thesis": "Dominant AI infrastructure provider. Blackwell GPU ramp should drive data center revenue to new highs. Pricing power intact.",
-      "stop_loss": null,
-      "take_profit": 1000.0,
-      "peak_price": 910.0,
-      "trailing_stop_pct": 0.1
-    },
-    {
-      "ticker": "TSLA",
-      "shares": 30.0,
-      "avg_cost": 200.0,
-      "entry_date": "2024-11-05",
-      "thesis": "Post-election momentum trade on autonomous vehicle regulatory tailwinds. Short-term speculative position.",
-      "stop_loss": 195.0,
-      "take_profit": 280.0,
-      "peak_price": 260.0,
-      "trailing_stop_pct": 0.1
-    },
     {
       "ticker": "AMC",
       "shares": 200.0,

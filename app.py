@@ -818,14 +818,21 @@ def render_settings_tab():
 """)
 
     st.divider()
-    st.subheader("TAAPI.io Configuration")
+    st.subheader("Data Source")
+    source = config.DATA_SOURCE
+    if source != "taapi":
+        st.markdown(
+            f"**Active source:** `yfinance` — Yahoo Finance + local indicator computation. "
+            f"Free, no API key required."
+        )
+    else:
+        st.markdown(
+            f"**Active source:** `taapi` — TAAPI.io API "
+            f"({'key set ✓' if config.TAAPI_SECRET else '⚠️ no key set'})"
+        )
     st.markdown(f"""
-- **Exchange:** `{config.TAAPI_EXCHANGE}`
-- **Symbol format:** `TICKER{config.TAAPI_SYMBOL_SUFFIX}`
 - **Primary timeframe:** `{config.INTERVALS['primary']}`
 - **Secondary timeframe:** `{config.INTERVALS['secondary']}`
-- **Timeout:** {config.TAAPI_TIMEOUT_SECONDS}s  ·  **Max retries:** {config.TAAPI_MAX_RETRIES}
-- **Rate limit delay (free tier):** {config.TAAPI_RATE_LIMIT_DELAY}s between calls
 """)
 
     st.divider()

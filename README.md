@@ -23,27 +23,26 @@ python main.py --mock --verbose
 MOCK_MODE=true streamlit run app.py
 ```
 
-## TAAPI Plan Requirements
+## Live Data — No API Key Required
 
-> **The free TAAPI tier does not support US stocks.** It is limited to crypto pairs (BTC/USDT etc.) on Binance.
-
-To scan US equities with live data you need a **Basic plan or higher** from [taapi.io/pricing](https://taapi.io/pricing/).
-
-| Mode | API Key | Works for US stocks? |
-|---|---|---|
-| Mock (`--mock` / `MOCK_MODE=true`) | Not required | Yes — built-in sample data |
-| Live, free tier | Required | **No** — crypto only |
-| Live, Basic plan+ | Required | **Yes** |
-
-The engine handles this gracefully: if your key is rejected for a US stock, it stops immediately (no wasted API calls) and shows a clear error pointing to the upgrade path.
-
-## Setup with a Real API Key
+By default Annie uses **Yahoo Finance** (`yfinance`) as its data source. It's free, requires no account, and works for all US stocks immediately.
 
 ```bash
-cp .env.example .env
-# Edit .env and set TAAPI_SECRET=your_key_here
+# Live data works out of the box — just run it
 streamlit run app.py
+python main.py --tickers AAPL,MSFT,NVDA
 ```
+
+### Optional: TAAPI.io
+
+If you have a TAAPI **Basic plan or higher**, you can switch to it via `DATA_SOURCE=taapi` in your `.env`. Note the free TAAPI tier only covers crypto (BTC/USDT etc.) — it will not work for US stocks.
+
+| Data source | API key needed | US stocks |
+|---|---|---|
+| `yfinance` (default) | No | Yes |
+| Mock mode | No | Yes (sample data) |
+| `taapi` free tier | Yes | **No** — crypto only |
+| `taapi` Basic+ | Yes | Yes |
 
 ## Project Structure
 

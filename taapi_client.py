@@ -690,10 +690,16 @@ def fetch_indicators(ticker: str, interval: str) -> RawIndicatorBundle:
         logger.debug("Mock mode: returning sample data for %s/%s", ticker, interval)
         return _fetch_mock(ticker, interval)
 
+    # ── yfinance path (default) ───────────────────────────────────────────────
+    if config.DATA_SOURCE != "taapi":
+        logger.debug("yfinance: fetching %s/%s", ticker, interval)
+        return _fetch_yfinance(ticker, interval)
+
+    # ── TAAPI path (explicit opt-in via DATA_SOURCE=taapi) ────────────────────
     if not config.TAAPI_SECRET:
         logger.error(
-            "TAAPI_SECRET is not set. Either set it in .env or run with --mock. "
-            "Returning empty bundle for %s.", ticker
+            "DATA_SOURCE=taapi but TAAPI_SECRET is not set. "
+            "Either set TAAPI_SECRET in .env or switch to DATA_SOURCE=yfinance."
         )
         return RawIndicatorBundle(
             ticker=ticker, interval=interval,
@@ -702,10 +708,10 @@ def fetch_indicators(ticker: str, interval: str) -> RawIndicatorBundle:
 
     try:
         if config.USE_BULK_API:
-            logger.debug("Bulk mode: fetching all indicators for %s/%s", ticker, interval)
+            logger.debug("TAAPI bulk: fetching %s/%s", ticker, interval)
             return _fetch_bulk(ticker, interval)
 
-        logger.debug("Free-tier mode: fetching indicators one by one for %s/%s", ticker, interval)
+        logger.debug("TAAPI free-tier: fetching %s/%s", ticker, interval)
         return _fetch_free_tier(ticker, interval)
 
     except TaapiPlanError as exc:
@@ -718,6 +724,167 @@ def fetch_indicators(ticker: str, interval: str) -> RawIndicatorBundle:
             interval=interval,
             fetch_errors=["plan_restriction"],
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# YFINANCE BACKEND
+# ─────────────────────────────────────────────────────────────────────────────
+# Uses Yahoo Finance (via yfinance) + local indicator computation (ta library).
+# Free, no API key, no meaningful rate limits.
+# Data is ~15 min delayed — fine for daily/4h swing trading.
+
+try:
+    import yfinance as _yf
+    import ta as _ta
+    _YFINANCE_AVAILABLE = True
+except ImportError:
+    _YFINANCE_AVAILABLE = False
+
+
+# Map TAAPI-style interval codes → (yfinance period, yfinance interval, resample rule)
+# "resample rule" is non-None when we download at a finer granularity and aggregate.
+# yfinance does not offer a native 4h interval for stocks, so we download 1h and resample.
+_YF_INTERVAL_MAP: Dict[str, tuple] = {
+    "1d":  ("3mo",  "1d",   None),   # 90 days of daily bars
+    "4h":  ("60d",  "1h",   "4h"),   # 60 days of 1h bars, resampled to 4h
+    "1h":  ("7d",   "1h",   None),
+    "1w":  ("1y",   "1wk",  None),
+    "15m": ("5d",   "15m",  None),
+}
+
+
+def _last(series) -> Optional[float]:
+    """Return the last non-NaN value from a pandas Series, or None."""
+    try:
+        if series is None or series.empty:
+            return None
+        val = series.iloc[-1]
+        import math
+        return None if (val != val or math.isnan(val)) else float(val)
+    except Exception:
+        return None
+
+
+def _fetch_yfinance(ticker: str, interval: str) -> RawIndicatorBundle:
+    """
+    Fetch OHLCV data from Yahoo Finance and compute all indicators locally
+    using the `ta` library. Returns a fully populated RawIndicatorBundle.
+
+    This is a drop-in replacement for the TAAPI free-tier path — it produces
+    the same RawIndicatorBundle shape, so nothing else in the pipeline changes.
+
+    Args:
+        ticker:   Stock symbol, e.g. "AAPL"
+        interval: TAAPI-style interval code, e.g. "1d" or "4h"
+    """
+    bundle = RawIndicatorBundle(ticker=ticker, interval=interval)
+
+    if not _YFINANCE_AVAILABLE:
+        logger.error("yfinance/ta not installed. Run: pip install yfinance ta")
+        bundle.fetch_errors.append("yfinance_not_installed")
+        return bundle
+
+    yf_period, yf_interval, resample_rule = _YF_INTERVAL_MAP.get(
+        interval, ("3mo", "1d", None)
+    )
+
+    try:
+        hist = _yf.Ticker(ticker).history(
+            period=yf_period,
+            interval=yf_interval,
+            auto_adjust=True,
+        )
+
+        if hist is None or hist.empty:
+            logger.warning("yfinance: no data returned for %s/%s", ticker, interval)
+            bundle.fetch_errors.append("no_data")
+            return bundle
+
+        # Normalise column names to lowercase
+        hist.columns = [c.lower() for c in hist.columns]
+
+        # Resample 1h → 4h when needed (yfinance has no native 4h stock bars)
+        if resample_rule:
+            hist = hist.resample(resample_rule).agg({
+                "open":   "first",
+                "high":   "max",
+                "low":    "min",
+                "close":  "last",
+                "volume": "sum",
+            }).dropna()
+
+        if len(hist) < 30:
+            logger.warning(
+                "yfinance: only %d bars for %s/%s — need ≥30 for reliable indicators",
+                len(hist), ticker, interval,
+            )
+            # Still proceed — partial data is better than none
+
+        close  = hist["close"]
+        high   = hist["high"]
+        low    = hist["low"]
+        volume = hist["volume"]
+
+        # ── Current snapshot ──────────────────────────────────────────────
+        bundle.close  = float(close.iloc[-1])
+        bundle.volume = float(volume.iloc[-1])
+
+        # ── RSI ───────────────────────────────────────────────────────────
+        bundle.rsi = _last(_ta.momentum.RSIIndicator(close, window=14).rsi())
+        if bundle.rsi is None:
+            bundle.fetch_errors.append("rsi")
+
+        # ── MACD ──────────────────────────────────────────────────────────
+        macd = _ta.trend.MACD(close, window_slow=26, window_fast=12, window_sign=9)
+        bundle.macd_value     = _last(macd.macd())
+        bundle.macd_signal    = _last(macd.macd_signal())
+        bundle.macd_histogram = _last(macd.macd_diff())
+        if bundle.macd_value is None:
+            bundle.fetch_errors.append("macd")
+
+        # ── SMA / EMA ─────────────────────────────────────────────────────
+        bundle.sma_20 = _last(_ta.trend.SMAIndicator(close, window=20).sma_indicator())
+        bundle.ema_20 = _last(_ta.trend.EMAIndicator(close, window=20).ema_indicator())
+
+        # ── Bollinger Bands ───────────────────────────────────────────────
+        bb = _ta.volatility.BollingerBands(close, window=20, window_dev=2)
+        bundle.bb_upper  = _last(bb.bollinger_hband())
+        bundle.bb_middle = _last(bb.bollinger_mavg())
+        bundle.bb_lower  = _last(bb.bollinger_lband())
+
+        # ── Stochastic ────────────────────────────────────────────────────
+        stoch = _ta.momentum.StochasticOscillator(high, low, close, window=14, smooth_window=3)
+        bundle.stoch_k = _last(stoch.stoch())
+        bundle.stoch_d = _last(stoch.stoch_signal())
+
+        # ── ATR ───────────────────────────────────────────────────────────
+        bundle.atr = _last(_ta.volatility.AverageTrueRange(high, low, close, window=14).average_true_range())
+        if bundle.atr is None:
+            bundle.fetch_errors.append("atr")
+
+        # ── ADX ───────────────────────────────────────────────────────────
+        bundle.adx = _last(_ta.trend.ADXIndicator(high, low, close, window=14).adx())
+        if bundle.adx is None:
+            bundle.fetch_errors.append("adx")
+
+        # ── OBV ───────────────────────────────────────────────────────────
+        bundle.obv = _last(_ta.volume.OnBalanceVolumeIndicator(close, volume).on_balance_volume())
+
+        logger.debug(
+            "yfinance %s/%s: close=%.2f rsi=%.1f atr=%.2f adx=%.1f bars=%d",
+            ticker, interval,
+            bundle.close or 0,
+            bundle.rsi or 0,
+            bundle.atr or 0,
+            bundle.adx or 0,
+            len(hist),
+        )
+
+    except Exception as exc:
+        logger.warning("yfinance fetch error for %s/%s: %s", ticker, interval, exc)
+        bundle.fetch_errors.append("yfinance_error")
+
+    return bundle
 
 
 # ─────────────────────────────────────────────────────────────────────────────

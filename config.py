@@ -16,6 +16,28 @@ import os
 # TAAPI.io is the data provider. It serves technical indicator values for
 # thousands of stocks. You need an account at taapi.io to use the live API.
 
+# ─────────────────────────────────────────────────────────────────────────────
+# DATA SOURCE
+# ─────────────────────────────────────────────────────────────────────────────
+# Annie can fetch market data from two sources:
+#
+#   "yfinance" (default) — Uses Yahoo Finance via the yfinance library.
+#                          Free, no API key, no rate limits worth worrying about.
+#                          Data is ~15 min delayed, which is fine for swing trading.
+#                          Computes all indicators locally with pandas-ta.
+#
+#   "taapi"              — Uses the TAAPI.io API. Requires a paid plan (Basic+)
+#                          to access US stocks. The free tier only covers crypto.
+#
+# If you have a TAAPI paid plan, set DATA_SOURCE=taapi in your .env.
+# Otherwise, leave it as "yfinance" — it just works.
+
+DATA_SOURCE: str = os.getenv("DATA_SOURCE", "yfinance").lower()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAAPI.io CONNECTION SETTINGS  (only used when DATA_SOURCE=taapi)
+# ─────────────────────────────────────────────────────────────────────────────
+
 TAAPI_BASE_URL: str = "https://api.taapi.io"
 
 # Your secret API key is loaded from the .env file — never hardcode it here.
