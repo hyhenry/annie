@@ -30,6 +30,11 @@ build/
 .idea/
 *.swp
 
+# Database (generated at runtime — not committed)
+*.db
+*.db-shm
+*.db-wal
+
 # macOS
 .DS_Store
 

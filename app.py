@@ -36,6 +36,7 @@ from portfolio import Holding, Portfolio, load_portfolio, save_portfolio
 from portfolio_monitor import HoldingReport, monitor_portfolio, reports_to_json as holding_reports_to_json
 from engine import run_engine, load_tickers, reports_to_json as scan_reports_to_json
 from taapi_client import fetch_all_symbols
+from db import save_scan, load_latest_scan, list_scans, load_scan_by_id
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -94,8 +95,9 @@ def rec_badge(rec: str) -> str:
 
 def _init_state():
     defaults = {
-        "portfolio_reports":  None,   # List[HoldingReport] from last portfolio analysis
-        "scan_results":       None,   # List[StockReport] from last opportunity scan
+        "portfolio_reports":  None,
+        "scan_results":       None,
+        "scan_meta":          None,   # metadata from DB row: scanned_at, tickers, etc.
         "portfolio_path":     config.PORTFOLIO_FILE,
         "last_portfolio_run": None,
         "last_scan_run":      None,
@@ -104,6 +106,14 @@ def _init_state():
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+    # Auto-load the last scan from DB on first page load
+    if st.session_state.scan_results is None:
+        cached = load_latest_scan()
+        if cached:
+            st.session_state.scan_results = cached["reports"]
+            st.session_state.scan_meta    = cached["meta"]
+            st.session_state.last_scan_run = cached["meta"]["scanned_at"]
 
 
 _init_state()
@@ -507,8 +517,11 @@ def render_scanner_tab():
         else:
             with st.spinner(f"Scanning {len(raw_tickers)} ticker(s) …"):
                 results = run_engine(raw_tickers, verbose=False)
-                st.session_state.scan_results       = results
-                st.session_state.last_scan_run      = datetime.now().strftime("%H:%M:%S")
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                st.session_state.scan_results  = results
+                st.session_state.last_scan_run = ts
+                st.session_state.scan_meta     = None
+                save_scan(results, raw_tickers)
                 _check_plan_restriction(results)
 
     # ── Scan all TAAPI symbols ────────────────────────────────────────────────
@@ -530,8 +543,11 @@ def render_scanner_tab():
             )
         with st.spinner(f"Scanning all {len(all_tickers)} TAAPI stocks …"):
             results = run_engine(all_tickers, verbose=False)
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             st.session_state.scan_results  = results
-            st.session_state.last_scan_run = datetime.now().strftime("%H:%M:%S")
+            st.session_state.last_scan_run = ts
+            st.session_state.scan_meta     = None
+            save_scan(results, all_tickers)
             _check_plan_restriction(results)
 
     results = st.session_state.scan_results
@@ -635,8 +651,44 @@ def render_scanner_tab():
                     c_r.caption(f"{score:.0f}")
                     st.progress(int(min(100, max(0, score))))
 
-    if st.session_state.last_scan_run:
-        st.caption(f"Last scan at {st.session_state.last_scan_run}")
+    # Footer: cache status + history picker
+    st.divider()
+    col_ts, col_hist = st.columns([2, 3])
+
+    with col_ts:
+        if st.session_state.last_scan_run:
+            meta = st.session_state.scan_meta
+            if meta:
+                # Loaded from DB cache
+                src = "mock" if meta["mock_mode"] else meta["data_source"]
+                st.caption(
+                    f"📦 Cached results from **{meta['scanned_at']}** "
+                    f"({meta['ticker_count']} tickers · {src})"
+                )
+            else:
+                st.caption(f"✅ Fresh scan at **{st.session_state.last_scan_run}**")
+
+    with col_hist:
+        history = list_scans()
+        if len(history) > 1:
+            options = {
+                f"{h['scanned_at']}  ·  {h['ticker_count']} tickers"
+                f"{'  · mock' if h['mock_mode'] else ''}": h["id"]
+                for h in history
+            }
+            chosen_label = st.selectbox(
+                "Load a previous scan",
+                options=list(options.keys()),
+                index=0,
+                label_visibility="collapsed",
+            )
+            if st.button("⏪ Load", key="load_hist"):
+                row = load_scan_by_id(options[chosen_label])
+                if row:
+                    st.session_state.scan_results  = row["reports"]
+                    st.session_state.scan_meta     = row["meta"]
+                    st.session_state.last_scan_run = row["meta"]["scanned_at"]
+                    st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
