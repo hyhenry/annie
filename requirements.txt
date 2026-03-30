@@ -1,0 +1,23 @@
+# Annie — Stock Recommendation Engine
+# Python dependencies
+#
+# Install with: pip install -r requirements.txt
+# Requires Python 3.9+
+
+# HTTP client — used to call the TAAPI.io API
+requests==2.31.0
+
+# Loads environment variables from a .env file into os.environ
+python-dotenv==1.0.0
+
+# Streamlit — the web frontend
+streamlit>=1.28.0
+
+# Pandas — used by Streamlit for DataFrames and table display
+pandas>=2.0.0
+
+# Test runner
+pytest==7.4.3
+
+# Code coverage reporting (optional but recommended)
+pytest-cov==4.1.0
