@@ -18,6 +18,9 @@ This file is the UI layer only — all business logic lives in the other modules
 
 import json
 import os
+import subprocess
+import sys
+import time
 from datetime import date, datetime
 from typing import List, Optional
 
@@ -34,9 +37,12 @@ except ImportError:
 import config
 from portfolio import Holding, Portfolio, load_portfolio, save_portfolio
 from portfolio_monitor import HoldingReport, monitor_portfolio, reports_to_json as holding_reports_to_json
-from engine import run_engine, load_tickers, reports_to_json as scan_reports_to_json
+from engine import load_tickers, reports_to_json as scan_reports_to_json
 from taapi_client import fetch_all_symbols
-from db import save_scan, load_latest_scan, list_scans, load_scan_by_id
+from db import (
+    save_scan, load_latest_scan, list_scans, load_scan_by_id,
+    create_scan_job, get_active_job, get_job, cancel_job,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -93,11 +99,23 @@ def rec_badge(rec: str) -> str:
 # SESSION STATE
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _launch_scan_worker(job_id: int) -> None:
+    """Spawn scan_worker.py as a detached subprocess that outlives this Streamlit session."""
+    worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scan_worker.py")
+    subprocess.Popen(
+        [sys.executable, worker, str(job_id)],
+        start_new_session=True,   # detach from Streamlit's process group
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def _init_state():
     defaults = {
         "portfolio_reports":  None,
         "scan_results":       None,
-        "scan_meta":          None,   # metadata from DB row: scanned_at, tickers, etc.
+        "scan_meta":          None,
+        "active_job_id":      None,   # job_id of the currently running background scan
         "portfolio_path":     config.PORTFOLIO_FILE,
         "last_portfolio_run": None,
         "last_scan_run":      None,
@@ -107,12 +125,18 @@ def _init_state():
         if k not in st.session_state:
             st.session_state[k] = v
 
-    # Auto-load the last scan from DB on first page load
-    if st.session_state.scan_results is None:
+    # On first load: check for an in-progress background job first
+    if st.session_state.active_job_id is None:
+        active = get_active_job()
+        if active:
+            st.session_state.active_job_id = active["id"]
+
+    # If no active job, auto-load the last completed scan
+    if st.session_state.active_job_id is None and st.session_state.scan_results is None:
         cached = load_latest_scan()
         if cached:
-            st.session_state.scan_results = cached["reports"]
-            st.session_state.scan_meta    = cached["meta"]
+            st.session_state.scan_results  = cached["reports"]
+            st.session_state.scan_meta     = cached["meta"]
             st.session_state.last_scan_run = cached["meta"]["scanned_at"]
 
 
@@ -481,12 +505,43 @@ def _render_holding_card(report: HoldingReport):
 # TAB 2: OPPORTUNITY SCANNER
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _start_scan(tickers: list) -> None:
+    """Create a DB job and launch the worker subprocess."""
+    job_id = create_scan_job(tickers, config.MOCK_MODE, config.DATA_SOURCE)
+    _launch_scan_worker(job_id)
+    st.session_state.active_job_id = job_id
+    st.session_state.scan_results  = None
+    st.session_state.scan_meta     = None
+
+
 def render_scanner_tab():
     st.header("🔍 Opportunity Scanner")
-    st.caption(
-        "Scan a list of stocks for new buy opportunities. "
-        "Results are ranked by score — highest first."
-    )
+
+    # ── Check for an active background job ───────────────────────────────────
+    job_id = st.session_state.active_job_id
+    if job_id is not None:
+        job = get_job(job_id)
+        if job and job["status"] in ("pending", "running"):
+            _render_scan_progress(job)
+            return   # don't show the input form while a scan is running
+        elif job and job["status"] == "complete":
+            # Job just finished — load results and clear active job
+            partial = job["partial_results"]
+            if partial:
+                st.session_state.scan_results  = partial
+                st.session_state.scan_meta     = None
+                st.session_state.last_scan_run = job["updated_at"]
+            st.session_state.active_job_id = None
+            _check_plan_restriction(partial or [])
+        elif job and job["status"] == "error":
+            st.error(f"Scan failed: {job['error']}")
+            st.session_state.active_job_id = None
+        elif job and job["status"] == "cancelled":
+            st.info("Scan was cancelled.")
+            st.session_state.active_job_id = None
+
+    # ── Input + launch controls ───────────────────────────────────────────────
+    st.caption("Scans run in the background — close this tab and come back any time.")
 
     col_input, col_run = st.columns([3, 1])
 
@@ -501,61 +556,30 @@ def render_scanner_tab():
 
     with col_run:
         st.markdown("<br>", unsafe_allow_html=True)
-        run_scan  = st.button("▶  Run Scan",         type="primary",   use_container_width=True)
-        scan_all  = st.button("🌐 Scan All Stocks",   type="secondary", use_container_width=True,
-                               help="Fetch all ~467 US stocks from TAAPI and score each one. "
-                                    "In mock mode this is instant. On the live free tier it "
-                                    "takes ~90 minutes due to rate limits.")
+        run_scan = st.button("▶  Run Scan",       type="primary",   use_container_width=True)
+        scan_all = st.button("🌐 Scan All Stocks", type="secondary", use_container_width=True,
+                             help="Score all ~467 US stocks. Runs in the background.")
         filter_buy_only = st.checkbox("Buy only", value=False)
         min_score = st.slider("Min score", 0, 100, 0, 5)
 
-    # ── Scan a custom list ────────────────────────────────────────────────────
     if run_scan:
         raw_tickers = [t.strip().upper() for t in ticker_input.replace("\n", ",").split(",") if t.strip()]
         if not raw_tickers:
             st.warning("Enter at least one ticker symbol.")
         else:
-            with st.spinner(f"Scanning {len(raw_tickers)} ticker(s) …"):
-                results = run_engine(raw_tickers, verbose=False)
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                st.session_state.scan_results  = results
-                st.session_state.last_scan_run = ts
-                st.session_state.scan_meta     = None
-                save_scan(results, raw_tickers)
-                _check_plan_restriction(results)
+            _start_scan(raw_tickers)
+            st.rerun()
 
-    # ── Scan all TAAPI symbols ────────────────────────────────────────────────
     if scan_all:
-        all_tickers = fetch_all_symbols()
-        if not config.MOCK_MODE:
-            est_minutes = round(len(all_tickers) * config.TAAPI_RATE_LIMIT_DELAY * 10 / 60)
-            st.info(
-                f"**Live mode:** scanning {len(all_tickers)} symbols will take "
-                f"~{est_minutes} minutes on the free tier (rate-limited to "
-                f"{config.TAAPI_RATE_LIMIT_DELAY}s per call). "
-                f"Results will appear below when complete."
-            )
-        else:
-            st.info(
-                f"**Mock mode:** scanning {len(all_tickers)} symbols instantly. "
-                f"Only AAPL, MSFT, NVDA, TSLA, AMC, and SNDL have rich mock data — "
-                f"all other tickers use neutral fallback values and will score ~50 (Watch)."
-            )
-        with st.spinner(f"Scanning all {len(all_tickers)} TAAPI stocks …"):
-            results = run_engine(all_tickers, verbose=False)
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            st.session_state.scan_results  = results
-            st.session_state.last_scan_run = ts
-            st.session_state.scan_meta     = None
-            save_scan(results, all_tickers)
-            _check_plan_restriction(results)
+        _start_scan(fetch_all_symbols())
+        st.rerun()
 
+    # ── Results ───────────────────────────────────────────────────────────────
     results = st.session_state.scan_results
     if results is None:
         st.info("Enter tickers above and click **▶ Run Scan** to find opportunities.")
         return
 
-    # Apply filters
     filtered = results
     if filter_buy_only:
         filtered = [r for r in filtered if r.recommendation == "Buy"]
@@ -566,32 +590,29 @@ def render_scanner_tab():
         st.info("No results match the current filters.")
         return
 
-    # Summary
     n_buy   = sum(1 for r in filtered if r.recommendation == "Buy")
     n_watch = sum(1 for r in filtered if r.recommendation == "Watch")
     n_avoid = sum(1 for r in filtered if r.recommendation == "Avoid")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Scanned", str(len(results)))
-    c2.metric("🟢 Buy",  str(n_buy))
+    c2.metric("🟢 Buy",   str(n_buy))
     c3.metric("🟡 Watch", str(n_watch))
     c4.metric("⚫ Avoid", str(n_avoid))
 
     st.divider()
-
-    # Results table
     st.subheader("Ranked Results")
     rows = []
     for r in filtered:
         emoji = REC_EMOJI.get(r.recommendation, "❓")
         rows.append({
-            "Ticker":    r.ticker,
-            "Score":     r.score,
-            "Signal":    f"{emoji}  {r.recommendation}",
+            "Ticker":     r.ticker,
+            "Score":      r.score,
+            "Signal":     f"{emoji}  {r.recommendation}",
             "Confidence": r.confidence,
-            "Trend":     r.factor_scores.get("trend", 0),
-            "Momentum":  r.factor_scores.get("momentum", 0),
-            "Volume":    r.factor_scores.get("volume", 0),
-            "Entry":     r.factor_scores.get("entry_timing", 0),
+            "Trend":      r.factor_scores.get("trend", 0),
+            "Momentum":   r.factor_scores.get("momentum", 0),
+            "Volume":     r.factor_scores.get("volume", 0),
+            "Entry":      r.factor_scores.get("entry_timing", 0),
         })
 
     df = pd.DataFrame(rows)
@@ -610,7 +631,6 @@ def render_scanner_tab():
         use_container_width=True,
     )
 
-    # Detail expanders for each result
     st.divider()
     st.subheader("Details")
     for r in filtered:
@@ -629,23 +649,22 @@ def render_scanner_tab():
                     tp = r.trade_plan
                     st.markdown("**Trade Plan:**")
                     t1, t2, t3, t4 = st.columns(4)
-                    t1.metric("Entry",   f"${tp['entry']:.2f}")
-                    t2.metric("Stop",    f"${tp['stop_loss']:.2f}")
-                    t3.metric("Target",  f"${tp['take_profit']:.2f}")
-                    t4.metric("Shares",  str(tp['position_size_shares']))
+                    t1.metric("Entry",  f"${tp['entry']:.2f}")
+                    t2.metric("Stop",   f"${tp['stop_loss']:.2f}")
+                    t3.metric("Target", f"${tp['take_profit']:.2f}")
+                    t4.metric("Shares", str(tp['position_size_shares']))
                     st.caption(r.risk_note)
 
             with right:
                 st.markdown("**Factor Scores**")
-                factor_items = [
-                    ("Trend",         r.factor_scores.get("trend", 0)),
-                    ("Momentum",      r.factor_scores.get("momentum", 0)),
-                    ("Volume",        r.factor_scores.get("volume", 0)),
-                    ("Entry Timing",  r.factor_scores.get("entry_timing", 0)),
-                    ("Volatility",    r.factor_scores.get("volatility", 0)),
-                    ("Multi-TF",      r.factor_scores.get("multi_timeframe", 0)),
-                ]
-                for label, score in factor_items:
+                for label, score in [
+                    ("Trend",        r.factor_scores.get("trend", 0)),
+                    ("Momentum",     r.factor_scores.get("momentum", 0)),
+                    ("Volume",       r.factor_scores.get("volume", 0)),
+                    ("Entry Timing", r.factor_scores.get("entry_timing", 0)),
+                    ("Volatility",   r.factor_scores.get("volatility", 0)),
+                    ("Multi-TF",     r.factor_scores.get("multi_timeframe", 0)),
+                ]:
                     c_l, c_r = st.columns([2, 1])
                     c_l.caption(label)
                     c_r.caption(f"{score:.0f}")
@@ -659,14 +678,13 @@ def render_scanner_tab():
         if st.session_state.last_scan_run:
             meta = st.session_state.scan_meta
             if meta:
-                # Loaded from DB cache
                 src = "mock" if meta["mock_mode"] else meta["data_source"]
                 st.caption(
                     f"📦 Cached results from **{meta['scanned_at']}** "
                     f"({meta['ticker_count']} tickers · {src})"
                 )
             else:
-                st.caption(f"✅ Fresh scan at **{st.session_state.last_scan_run}**")
+                st.caption(f"✅ Scan completed at **{st.session_state.last_scan_run}**")
 
     with col_hist:
         history = list_scans()
@@ -689,6 +707,90 @@ def render_scanner_tab():
                     st.session_state.scan_meta     = row["meta"]
                     st.session_state.last_scan_run = row["meta"]["scanned_at"]
                     st.rerun()
+
+
+def _render_scan_progress(job: dict) -> None:
+    """Render the live progress view while a background scan job is running."""
+    done      = job["done_count"]
+    total     = job["ticker_count"]
+    pct       = done / total if total > 0 else 0
+    ticker    = job["current_ticker"] or "…"
+    status    = job["status"]
+    elapsed   = _seconds_since(job["created_at"])
+    eta_str   = _eta(done, total, elapsed) if done > 0 else "calculating…"
+
+    st.subheader("⏳ Scan in progress")
+    st.caption(
+        f"You can close this tab — the scan will keep running in the background. "
+        f"Results will be here when you return."
+    )
+
+    # Progress bar + stats
+    st.progress(pct, text=f"**{done} / {total}** tickers  ·  now: `{ticker}`")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Done",      f"{done} / {total}")
+    c2.metric("Progress",  f"{pct:.0%}")
+    c3.metric("Elapsed",   _fmt_duration(elapsed))
+    c4.metric("ETA",       eta_str)
+
+    # Partial results table (sorted by score so far)
+    partial = job["partial_results"]
+    if partial:
+        partial_sorted = sorted(partial, key=lambda r: r.score, reverse=True)
+        st.divider()
+        st.caption(f"**Partial results so far** ({len(partial_sorted)} tickers scored)")
+        rows = []
+        for r in partial_sorted:
+            emoji = REC_EMOJI.get(r.recommendation, "❓")
+            rows.append({
+                "Ticker": r.ticker,
+                "Score":  r.score,
+                "Signal": f"{emoji}  {r.recommendation}",
+            })
+        st.dataframe(
+            pd.DataFrame(rows),
+            column_config={
+                "Score":  st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%.0f"),
+                "Signal": st.column_config.TextColumn("Signal", width="medium"),
+            },
+            hide_index=True,
+            use_container_width=True,
+            height=min(400, 40 + len(rows) * 35),
+        )
+
+    st.divider()
+    if st.button("✖ Cancel scan", type="secondary"):
+        cancel_job(job["id"])
+        st.session_state.active_job_id = None
+        st.rerun()
+
+    # Auto-refresh every 3 seconds while the job is running
+    time.sleep(3)
+    st.rerun()
+
+
+def _seconds_since(iso_ts: str) -> int:
+    try:
+        started = datetime.fromisoformat(iso_ts)
+        return max(0, int((datetime.now() - started).total_seconds()))
+    except Exception:
+        return 0
+
+
+def _fmt_duration(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    m, s = divmod(seconds, 60)
+    return f"{m}m {s:02d}s"
+
+
+def _eta(done: int, total: int, elapsed_s: int) -> str:
+    if done == 0:
+        return "…"
+    rate = done / elapsed_s if elapsed_s > 0 else 1
+    remaining = (total - done) / rate
+    return _fmt_duration(int(remaining))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
