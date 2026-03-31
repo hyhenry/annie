@@ -163,19 +163,9 @@ def render_sidebar():
             "🎭 Mock Mode",
             value=config.MOCK_MODE,
             help="Run with built-in sample data — no API key required. "
-                 "Great for exploring the engine without a TAAPI subscription.",
+                 "Great for exploring the engine without an internet connection.",
         )
         config.MOCK_MODE = mock
-
-        if not mock:
-            key = st.text_input(
-                "TAAPI Secret Key",
-                type="password",
-                value=config.TAAPI_SECRET or "",
-                placeholder="Paste your key from taapi.io …",
-            )
-            if key:
-                config.TAAPI_SECRET = key
 
         st.divider()
 
@@ -219,14 +209,7 @@ def _run_portfolio_analysis():
             st.session_state.last_portfolio_run = datetime.now().strftime("%H:%M:%S")
             st.session_state.error              = None
         except Exception as exc:
-            err = str(exc)
-            if "plan" in err.lower() or "free tier" in err.lower() or "taapi" in err.lower():
-                err = (
-                    "**TAAPI plan does not support US stocks.** "
-                    "Enable **Mock Mode** in the sidebar, or upgrade your plan at "
-                    "[taapi.io/pricing](https://taapi.io/pricing/)."
-                )
-            st.session_state.error = err
+            st.session_state.error = str(exc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -485,7 +468,7 @@ def _render_holding_card(report: HoldingReport):
 
 def _start_scan(tickers: list) -> None:
     """Create a DB job and launch the worker subprocess."""
-    job_id = create_scan_job(tickers, config.MOCK_MODE, config.DATA_SOURCE)
+    job_id = create_scan_job(tickers, config.MOCK_MODE, "yfinance")
     _launch_scan_worker(job_id)
     st.session_state.active_job_id = job_id
     st.session_state.scan_results  = None
@@ -992,17 +975,10 @@ def render_settings_tab():
 
     st.divider()
     st.subheader("Data Source")
-    source = config.DATA_SOURCE
-    if source != "taapi":
-        st.markdown(
-            f"**Active source:** `yfinance` — Yahoo Finance + local indicator computation. "
-            f"Free, no API key required."
-        )
-    else:
-        st.markdown(
-            f"**Active source:** `taapi` — TAAPI.io API "
-            f"({'key set ✓' if config.TAAPI_SECRET else '⚠️ no key set'})"
-        )
+    st.markdown(
+        "**Active source:** `yfinance` — Yahoo Finance + local indicator computation. "
+        "Free, no API key required."
+    )
     st.markdown(f"""
 - **Primary timeframe:** `{config.INTERVALS['primary']}`
 - **Secondary timeframe:** `{config.INTERVALS['secondary']}`

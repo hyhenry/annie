@@ -8,11 +8,11 @@ USAGE EXAMPLES:
     # Run with sample data and verbose output:
     python main.py --mock --verbose
 
-    # Analyse specific tickers using live TAAPI data:
+    # Analyse specific tickers:
     python main.py --tickers AAPL,MSFT,NVDA --verbose
 
-    # Scan every US stock on TAAPI (mock — instant; live — ~90 min):
-    python main.py --all --mock --only-buy --top 10
+    # Scan every stock in the S&P 500 + NASDAQ 100 universe:
+    python main.py --all --only-buy --top 10
 
     # Load tickers from a file and save output to JSON:
     python main.py --tickers-file tickers.json --output results.json
@@ -27,8 +27,8 @@ USAGE EXAMPLES:
     python main.py --help
 
 ENVIRONMENT:
-    Copy .env.example to .env and fill in your TAAPI_SECRET before using
-    live data. Without a key, use --mock to test the engine.
+    Copy .env.example to .env to customise settings.
+    Use --mock to run with built-in sample data (no internet required).
 """
 
 import argparse
@@ -46,7 +46,7 @@ except ImportError:
 
 import config
 from engine import run_engine, load_tickers, reports_to_json
-from taapi_client import fetch_all_symbols
+from universe import get_tickers_for_sectors
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -116,11 +116,8 @@ disclaimer:
         action="store_true",
         default=False,
         dest="all_symbols",
-        help="Scan every US stock available on TAAPI (~467 symbols). "
-             "Fetches the list from GET /exchange-symbols, then scores each one. "
-             "Warning: on the free tier this takes ~90 min due to rate limiting. "
-             "Use --top and --only-buy to filter results. "
-             "In mock mode the bundled all_symbols.json list is used instantly.",
+        help="Scan every stock in the S&P 500 + NASDAQ 100 universe. "
+             "Use --top and --only-buy to filter results.",
     )
 
     # ── Mode ───────────────────────────────────────────────────────────────
@@ -131,22 +128,13 @@ disclaimer:
         help="Run with built-in sample data — no API key or internet required. "
              "Useful for testing and exploring the output format.",
     )
-    parser.add_argument(
-        "--bulk",
-        action="store_true",
-        default=False,
-        help="Use the TAAPI Pro bulk endpoint (faster, requires Pro subscription). "
-             "Without this flag, the free-tier individual endpoints are used.",
-    )
-
     # ── Timeframes ─────────────────────────────────────────────────────────
     parser.add_argument(
         "--primary-interval",
         type=str,
         default=None,
         metavar="1d",
-        help="Primary analysis timeframe (default: 1d). "
-             "TAAPI codes: 1m 5m 15m 30m 1h 2h 4h 12h 1d 1w",
+        help="Primary analysis timeframe (default: 1d). Options: 1d, 4h, 1h, 1w",
     )
     parser.add_argument(
         "--secondary-interval",
@@ -231,24 +219,7 @@ disclaimer:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def validate_environment(mock_mode: bool) -> bool:
-    """
-    Check that required configuration is present before running.
-
-    Returns True if all checks pass, False if there is a blocking issue.
-    Prints helpful error messages to stderr.
-    """
-    if not mock_mode and not config.TAAPI_SECRET:
-        print(
-            "\n[ERROR] TAAPI_SECRET is not set.\n"
-            "\nTo fix this:\n"
-            "  1. Copy .env.example to .env\n"
-            "  2. Add your TAAPI API key to the TAAPI_SECRET= line\n"
-            "  3. Get a free key at https://taapi.io\n"
-            "\nAlternatively, run with --mock to use built-in sample data:\n"
-            "  python main.py --mock --verbose\n",
-            file=sys.stderr,
-        )
-        return False
+    """Returns True always — yfinance needs no API key."""
     return True
 
 
@@ -328,8 +299,6 @@ def main() -> int:
     # These override what's in .env / config.py for this run only.
     if args.mock:
         config.MOCK_MODE = True
-    if args.bulk:
-        config.USE_BULK_API = True
 
     # ── Validate environment ───────────────────────────────────────────────
     if not validate_environment(config.MOCK_MODE):
@@ -337,20 +306,11 @@ def main() -> int:
 
     # ── Load tickers ───────────────────────────────────────────────────────
     if args.all_symbols:
-        tickers = fetch_all_symbols()
+        tickers = get_tickers_for_sectors([])  # empty = all sectors
         print(
-            f"[INFO] Loaded {len(tickers)} symbols from TAAPI exchange-symbols endpoint.",
+            f"[INFO] Loaded {len(tickers)} tickers from S&P 500 + NASDAQ 100 universe.",
             file=sys.stderr,
         )
-        if not config.MOCK_MODE:
-            est_minutes = round(len(tickers) * config.TAAPI_RATE_LIMIT_DELAY * 10 / 60)
-            print(
-                f"[INFO] Estimated scan time on free tier: ~{est_minutes} minutes "
-                f"({len(tickers)} tickers × ~10 API calls each at "
-                f"{config.TAAPI_RATE_LIMIT_DELAY}s/call).\n"
-                f"       Use --top N or --only-buy to stop early.",
-                file=sys.stderr,
-            )
     elif args.tickers:
         # Tickers provided directly on the command line
         tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]

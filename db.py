@@ -143,7 +143,7 @@ def save_scan(reports, tickers: List[str]) -> None:
                 json.dumps(tickers),
                 json.dumps(_reports_to_dicts(reports)),
                 int(config.MOCK_MODE),
-                config.DATA_SOURCE,
+                "yfinance",
             ),
         )
 

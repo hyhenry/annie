@@ -55,13 +55,12 @@ def main() -> int:
         return 0
 
     # Apply the settings that were captured when the job was created
-    config.MOCK_MODE  = job["mock_mode"]
-    config.DATA_SOURCE = job["data_source"]
+    config.MOCK_MODE = job["mock_mode"]
 
     tickers = job["tickers"]
     logger.info(
-        "Starting job %d: %d tickers | mock=%s | source=%s",
-        job_id, len(tickers), config.MOCK_MODE, config.DATA_SOURCE,
+        "Starting job %d: %d tickers | mock=%s",
+        job_id, len(tickers), config.MOCK_MODE,
     )
 
     mark_job_running(job_id)
