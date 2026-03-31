@@ -24,7 +24,7 @@ python -m pytest tests/ -v
 | File | Role |
 |---|---|
 | `config.py` | Single source of truth for all weights, thresholds, settings |
-| `taapi_client.py` | Data fetching: yfinance (default) or TAAPI. Returns `RawIndicatorBundle` |
+| `taapi_client.py` | Data fetching: yfinance + local `ta` indicators. Returns `RawIndicatorBundle` |
 | `indicators.py` | Parses `RawIndicatorBundle` → `IndicatorData`; normalises each indicator 0-100 |
 | `scoring.py` | Weighted factor scores → Opportunity Score + Buy/Watch/Avoid |
 | `risk.py` | ATR-based stop-loss, take-profit, position sizing → `TradePlan` |
@@ -33,19 +33,21 @@ python -m pytest tests/ -v
 | `portfolio.py` | `Holding` / `Portfolio` dataclasses; JSON read/write |
 | `hold_scoring.py` | Hold Quality Score + Sell Risk Score models |
 | `portfolio_monitor.py` | Orchestrates portfolio analysis; returns `HoldingReport` list |
+| `universe.py` | S&P 500 + NASDAQ 100 universe from Wikipedia; sector/industry metadata; 7-day SQLite cache |
 | `scan_worker.py` | Detached subprocess: runs scans async, writes progress to SQLite per ticker |
 | `db.py` | SQLite persistence: `scans` history table + `scan_jobs` live progress table |
 | `app.py` | Streamlit frontend (4 tabs: Portfolio, Scanner, Manage, Settings) |
 | `portfolio.json` | User's holdings (edited via Manage tab or directly) |
-| `all_symbols.json` | 467 TAAPI US stock symbols (used by Scan All) |
-| `tickers.json` | Default short ticker list for Scanner tab |
+| `tickers.json` | Default short ticker list for Scanner tab custom mode |
 | `tests/test_scoring.py` | 83 unit tests — all passing |
 
 ## Architecture decisions
 
-**Data source:** `yfinance` + `ta` library by default — free, no API key, computes all indicators locally from OHLCV data. TAAPI is an opt-in via `DATA_SOURCE=taapi` in `.env` (requires paid Basic+ plan; their free tier is crypto-only).
+**Data source:** `yfinance` + `ta` library — free, no API key, computes all indicators locally from OHLCV data.
 
 **Async scans:** Clicking "Run Scan" spawns `scan_worker.py` as a detached subprocess (`start_new_session=True`) so it survives browser close. Worker writes `done_count`, `current_ticker`, and partial results to `scan_jobs` table after every ticker. App polls DB every 3s and shows progress bar + partial results table + ETA. Cancel button sets `status='cancelled'`; worker checks before each ticker.
+
+**Universe / sector scanner:** `universe.py` downloads S&P 500 from Wikipedia (`pd.read_html`, `id="constituents"`) and NASDAQ 100 from the Nasdaq-100 article. Combined (S&P 500 preferred on overlap), deduplicated, cached in `universe` + `universe_meta` SQLite tables with 7-day TTL. Scanner tab has two modes: "Custom tickers" (text input) and "By sector" (multiselect from live sector list → tickers derived from universe).
 
 **SQLite schema:**
 - `scans` — completed scan history (up to 10 rows, pruned automatically). Loaded on app startup for instant display.
@@ -63,9 +65,7 @@ python -m pytest tests/ -v
 ## Key config knobs (config.py / .env)
 | Setting | Default | Effect |
 |---|---|---|
-| `DATA_SOURCE` | `yfinance` | `taapi` to use TAAPI API instead |
 | `MOCK_MODE` | `false` | `true` for offline sample data |
-| `TAAPI_SECRET` | — | Required only if `DATA_SOURCE=taapi` |
 | `RISK_PER_TRADE_USD` | `500` | Position sizing budget per trade |
 | `TRAILING_STOP_DEFAULT_PCT` | `0.08` | Default trailing stop (8%) |
 | `MAX_POSITION_PCT` | `0.15` | Concentration limit (15% of portfolio) |

@@ -11,64 +11,6 @@ Every section is labelled and explained in plain English.
 import os
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAAPI.io CONNECTION SETTINGS
-# ─────────────────────────────────────────────────────────────────────────────
-# TAAPI.io is the data provider. It serves technical indicator values for
-# thousands of stocks. You need an account at taapi.io to use the live API.
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DATA SOURCE
-# ─────────────────────────────────────────────────────────────────────────────
-# Annie can fetch market data from two sources:
-#
-#   "yfinance" (default) — Uses Yahoo Finance via the yfinance library.
-#                          Free, no API key, no rate limits worth worrying about.
-#                          Data is ~15 min delayed, which is fine for swing trading.
-#                          Computes all indicators locally with pandas-ta.
-#
-#   "taapi"              — Uses the TAAPI.io API. Requires a paid plan (Basic+)
-#                          to access US stocks. The free tier only covers crypto.
-#
-# If you have a TAAPI paid plan, set DATA_SOURCE=taapi in your .env.
-# Otherwise, leave it as "yfinance" — it just works.
-
-DATA_SOURCE: str = os.getenv("DATA_SOURCE", "yfinance").lower()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAAPI.io CONNECTION SETTINGS  (only used when DATA_SOURCE=taapi)
-# ─────────────────────────────────────────────────────────────────────────────
-
-TAAPI_BASE_URL: str = "https://api.taapi.io"
-
-# Your secret API key is loaded from the .env file — never hardcode it here.
-# See .env.example for the format.
-TAAPI_SECRET: str = os.getenv("TAAPI_SECRET", "")
-
-# For US stocks, the exchange identifier on TAAPI is "stocks".
-TAAPI_EXCHANGE: str = os.getenv("TAAPI_EXCHANGE", "stocks")
-
-# TAAPI expects stock symbols in the format "AAPL/USD".
-TAAPI_SYMBOL_SUFFIX: str = "/USD"
-
-# How long to wait (in seconds) before giving up on a single API call.
-TAAPI_TIMEOUT_SECONDS: int = 15
-
-# How many times to retry a failed API call before giving up.
-TAAPI_MAX_RETRIES: int = 3
-
-# Seconds to wait before the first retry, doubles each attempt (exponential backoff).
-# e.g. 1st retry waits 1.5s, 2nd waits 3s, 3rd waits 6s.
-TAAPI_RETRY_BACKOFF_BASE: float = 1.5
-
-# Free-tier TAAPI accounts are rate-limited to about 1 call per second.
-# This delay (in seconds) is inserted between individual API calls to stay safe.
-TAAPI_RATE_LIMIT_DELAY: float = 1.5
-
-# Set to True if you have a Pro TAAPI plan, which supports a faster "bulk"
-# endpoint (fetches all indicators for one stock in a single HTTP call).
-USE_BULK_API: bool = os.getenv("USE_BULK_API", "false").lower() == "true"
-
-# ─────────────────────────────────────────────────────────────────────────────
 # MOCK MODE
 # ─────────────────────────────────────────────────────────────────────────────
 # Set to True (or pass --mock on the CLI) to run the engine with built-in

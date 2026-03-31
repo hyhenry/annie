@@ -1,38 +1,26 @@
 """
-taapi_client.py — TAAPI.io API integration layer.
+taapi_client.py — Market data fetcher (yfinance backend).
 
-This module is responsible for ONE thing: fetching raw indicator data from the
-TAAPI.io API (or returning mock data) and packaging it into a RawIndicatorBundle.
+Fetches raw technical indicator data for a stock at a given timeframe using
+Yahoo Finance (yfinance) and computes indicators locally with the `ta` library.
 
-It knows nothing about scoring logic. It just fetches data and hands it off.
-
-Three modes:
-    1. Mock mode    — Returns pre-built sample data. No internet required.
-    2. Free tier    — Calls each indicator endpoint individually (~10 calls per stock).
-                      Rate-limited to comply with TAAPI's free plan restrictions.
-    3. Bulk (Pro)   — One POST request fetches all indicators at once.
-                      Requires a TAAPI Pro subscription.
+Two modes:
+    1. Mock mode  — Returns pre-built sample data. No internet required.
+    2. Live mode  — Downloads OHLCV from Yahoo Finance and computes indicators.
 
 Public functions:
     fetch_indicators(ticker, interval) → RawIndicatorBundle
-    fetch_all_symbols()                → List[str]   (all US stocks on TAAPI)
 """
 
-import json
 import logging
-import os
-import time
-import threading
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
-
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 import config
 
 logger = logging.getLogger(__name__)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATA STRUCTURES
@@ -41,68 +29,50 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RawIndicatorBundle:
     """
-    Raw indicator values exactly as returned by TAAPI.io for one stock
-    at one timeframe.
+    Raw indicator values for one stock at one timeframe.
 
-    All fields are Optional — if TAAPI fails to return a value, the field
-    stays None and the scoring layer treats it as missing (with a small
-    confidence penalty).
+    All fields are Optional — if a value cannot be computed, the field stays
+    None and the scoring layer treats it as missing (with a small confidence
+    penalty).
     """
     ticker:         str
     interval:       str
 
-    # RSI: a number 0–100 measuring momentum (see config.py for explanation)
     rsi:            Optional[float] = None
 
-    # MACD components: value = MACD line, signal = signal line,
-    # histogram = difference between them (key momentum signal)
     macd_value:     Optional[float] = None
     macd_signal:    Optional[float] = None
     macd_histogram: Optional[float] = None
 
-    # SMA/EMA: moving average lines used to identify trend direction
     sma_20:         Optional[float] = None
     ema_20:         Optional[float] = None
 
-    # Bollinger Bands: upper/middle/lower price channel
     bb_upper:       Optional[float] = None
     bb_middle:      Optional[float] = None
     bb_lower:       Optional[float] = None
 
-    # Stochastic oscillator: K and D lines (similar to RSI, 0–100)
     stoch_k:        Optional[float] = None
     stoch_d:        Optional[float] = None
 
-    # ATR: average daily price range (used for stop-loss sizing)
     atr:            Optional[float] = None
-
-    # ADX: trend strength 0–100 (does NOT tell direction, only strength)
     adx:            Optional[float] = None
-
-    # OBV: cumulative volume indicator (positive = accumulation)
     obv:            Optional[float] = None
 
-    # Current close price (from candle endpoint)
     close:          Optional[float] = None
-
-    # Daily volume (from candle endpoint)
     volume:         Optional[float] = None
 
-    # Any indicators that failed to load are recorded here for debugging
     fetch_errors:   List[str] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MOCK DATA
 # ─────────────────────────────────────────────────────────────────────────────
-# Five realistic stock scenarios, covering the full range of outcomes.
-# These are used when MOCK_MODE=True — no API calls are made.
+# Five realistic stock scenarios covering the full range of outcomes.
+# Used when MOCK_MODE=True — no network calls are made.
 
 _MOCK_DATA: Dict[str, Dict[str, Dict[str, Any]]] = {
 
     # ── AAPL: Strong Buy ──────────────────────────────────────────────────────
-    # All signals aligned: strong uptrend, healthy momentum, not overbought,
-    # price in good entry zone, decent volume. Daily and 4h agree.
     "AAPL": {
         "1d": dict(
             rsi=58.4,
@@ -127,9 +97,6 @@ _MOCK_DATA: Dict[str, Dict[str, Dict[str, Any]]] = {
     },
 
     # ── MSFT: Watch (score ~72) ───────────────────────────────────────────────
-    # Uptrend intact but momentum cooling: RSI slightly above ideal zone,
-    # MACD histogram thin, stochastic approaching overbought. Good stock,
-    # but wait for a small pullback before buying.
     "MSFT": {
         "1d": dict(
             rsi=68.2,
@@ -154,9 +121,6 @@ _MOCK_DATA: Dict[str, Dict[str, Dict[str, Any]]] = {
     },
 
     # ── NVDA: Watch (score ~64) ───────────────────────────────────────────────
-    # Strong trend and momentum but very high ATR% (volatile stock).
-    # RSI is overbought, stochastic also overbought. Large ATR means wide
-    # stop-losses and bigger position-sizing risk. Score is Watch, not Buy.
     "NVDA": {
         "1d": dict(
             rsi=72.5,
@@ -181,9 +145,6 @@ _MOCK_DATA: Dict[str, Dict[str, Dict[str, Any]]] = {
     },
 
     # ── AMC: Avoid (score ~42) ────────────────────────────────────────────────
-    # Classic "avoid" setup: price below moving averages (downtrend),
-    # MACD histogram negative (selling pressure), ADX weak (no real trend —
-    # just drift). OBV low. No clear reason to buy.
     "AMC": {
         "1d": dict(
             rsi=44.0,
@@ -207,24 +168,21 @@ _MOCK_DATA: Dict[str, Dict[str, Dict[str, Any]]] = {
         ),
     },
 
-    # ── TSLA: Trim / Watch Closely (~score 58) ───────────────────────────────
-    # Strong run followed by stalling momentum: RSI elevated, stochastic
-    # overbought, MACD histogram shrinking. Position is profitable but
-    # showing early signs of distribution. ATR is high.
+    # ── TSLA: Watch (score ~58) ───────────────────────────────────────────────
     "TSLA": {
         "1d": dict(
             rsi=73.8,
-            macd_value=5.20, macd_signal=5.00, macd_histogram=0.20,  # histogram shrinking
+            macd_value=5.20, macd_signal=5.00, macd_histogram=0.20,
             sma_20=218.0, ema_20=220.0,
             bb_upper=255.0, bb_middle=225.0, bb_lower=195.0,
-            stoch_k=84.0, stoch_d=87.0,  # K below D = rolling over
+            stoch_k=84.0, stoch_d=87.0,
             atr=9.80, adx=24.0,
             obv=7_200_000,
             close=242.0, volume=680_000,
         ),
         "4h": dict(
             rsi=67.0,
-            macd_value=2.10, macd_signal=2.30, macd_histogram=-0.20,  # 4h already negative
+            macd_value=2.10, macd_signal=2.30, macd_histogram=-0.20,
             sma_20=235.0, ema_20=236.0,
             bb_upper=250.0, bb_middle=237.0, bb_lower=224.0,
             stoch_k=72.0, stoch_d=78.0,
@@ -235,9 +193,6 @@ _MOCK_DATA: Dict[str, Dict[str, Dict[str, Any]]] = {
     },
 
     # ── SNDL: Auto-Avoid (hard filter — price below $5) ───────────────────────
-    # This stock will be automatically rejected before scoring even starts
-    # because its price is below the $5 minimum threshold. Regardless of
-    # indicator values, penny stocks are excluded from recommendations.
     "SNDL": {
         "1d": dict(
             rsi=52.0,
@@ -262,7 +217,7 @@ _MOCK_DATA: Dict[str, Dict[str, Dict[str, Any]]] = {
     },
 }
 
-# For any ticker not in the mock data dictionary, fall back to this neutral template.
+# Neutral fallback for any ticker not in the mock dictionary
 _MOCK_FALLBACK: Dict[str, Any] = dict(
     rsi=50.0,
     macd_value=0.0, macd_signal=0.0, macd_histogram=0.0,
@@ -276,363 +231,15 @@ _MOCK_FALLBACK: Dict[str, Any] = dict(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RATE LIMITING (thread-safe)
-# ─────────────────────────────────────────────────────────────────────────────
-# TAAPI's free tier allows roughly one request per second. This lock ensures
-# that even if you were to run multiple tickers in threads, calls are spaced out.
-
-_rate_lock = threading.Lock()
-_last_call_time: float = 0.0
-
-
-def _rate_limit() -> None:
-    """Sleep if needed to respect TAAPI's free-tier rate limit."""
-    global _last_call_time
-    with _rate_lock:
-        elapsed = time.monotonic() - _last_call_time
-        wait = config.TAAPI_RATE_LIMIT_DELAY - elapsed
-        if wait > 0:
-            logger.debug("Rate limit: sleeping %.2fs", wait)
-            time.sleep(wait)
-        _last_call_time = time.monotonic()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HTTP SESSION
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _build_session() -> requests.Session:
-    """
-    Create a requests Session with:
-      • Automatic retry on server errors (5xx) and network timeouts
-      • Connection keep-alive for efficiency
-    """
-    session = requests.Session()
-    retry = Retry(
-        total=config.TAAPI_MAX_RETRIES,
-        backoff_factor=config.TAAPI_RETRY_BACKOFF_BASE,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET", "POST"],
-        raise_on_status=False,
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    session.mount("http://",  adapter)
-    return session
-
-
-# Shared session (created once, reused across all calls in a run)
-_session: Optional[requests.Session] = None
-
-
-def _get_session() -> requests.Session:
-    global _session
-    if _session is None:
-        _session = _build_session()
-    return _session
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# INDIVIDUAL ENDPOINT CALLS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _taapi_symbol(ticker: str) -> str:
-    """Convert 'AAPL' → 'AAPL/USD' (TAAPI's expected symbol format)."""
-    return f"{ticker}{config.TAAPI_SYMBOL_SUFFIX}"
-
-
-class TaapiPlanError(Exception):
-    """
-    Raised when TAAPI rejects a request because the API key's plan does not
-    support US stocks.
-
-    TAAPI free tier only covers crypto (Binance pairs). US stocks require at
-    least a Basic paid plan. When this error is raised, the caller should
-    stop making further API calls for the same ticker — they will all fail
-    with the same 403 response.
-    """
-    pass
-
-
-def _get_indicator(
-    endpoint: str,
-    ticker: str,
-    interval: str,
-    extra_params: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    """
-    Call a single TAAPI indicator endpoint.
-
-    Returns the parsed JSON response dict, or None if the call failed
-    after all retries.
-
-    Raises:
-        TaapiPlanError — if the API key's plan does not allow US stocks.
-                         The caller should abort further calls for this ticker.
-
-    Args:
-        endpoint:     TAAPI endpoint name, e.g. "rsi", "macd", "bbands"
-        ticker:       Stock symbol, e.g. "AAPL"
-        interval:     Timeframe, e.g. "1d", "4h"
-        extra_params: Additional query parameters (e.g. {"period": 20})
-    """
-    _rate_limit()
-
-    params: Dict[str, Any] = {
-        "secret":   config.TAAPI_SECRET,
-        "exchange": config.TAAPI_EXCHANGE,
-        "symbol":   _taapi_symbol(ticker),
-        "interval": interval,
-    }
-    if extra_params:
-        params.update(extra_params)
-
-    url = f"{config.TAAPI_BASE_URL}/{endpoint}"
-    logger.debug("GET %s | ticker=%s interval=%s", endpoint, ticker, interval)
-
-    try:
-        resp = _get_session().get(url, params=params, timeout=config.TAAPI_TIMEOUT_SECONDS)
-        if resp.status_code == 200:
-            return resp.json()
-        elif resp.status_code == 403:
-            # Check whether this is a plan restriction (not just an auth error)
-            body = resp.text
-            if "Free plans only permits" in body or "plan" in body.lower():
-                raise TaapiPlanError(
-                    "Your TAAPI plan does not support US stocks. "
-                    "The free tier only covers crypto (BTC/USDT, ETH/USDT, etc.). "
-                    "Upgrade to a Basic or higher plan at https://taapi.io/pricing/ "
-                    "to scan US equities, or run with --mock / MOCK_MODE=true to use "
-                    "built-in sample data without an API key."
-                )
-            logger.warning(
-                "TAAPI %s returned HTTP 403 for %s/%s: %s",
-                endpoint, ticker, interval, body[:200],
-            )
-            return None
-        else:
-            logger.warning(
-                "TAAPI %s returned HTTP %d for %s/%s: %s",
-                endpoint, resp.status_code, ticker, interval, resp.text[:200]
-            )
-            return None
-    except TaapiPlanError:
-        raise  # propagate — do not swallow
-    except requests.exceptions.Timeout:
-        logger.warning("TAAPI timeout: %s for %s/%s", endpoint, ticker, interval)
-        return None
-    except requests.exceptions.RequestException as exc:
-        logger.warning("TAAPI request error: %s for %s/%s: %s", endpoint, ticker, interval, exc)
-        return None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FREE-TIER FETCH (individual calls)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _fetch_free_tier(ticker: str, interval: str) -> RawIndicatorBundle:
-    """
-    Fetch all indicators using individual TAAPI GET endpoints.
-    Suitable for free-tier accounts. Makes ~10 HTTP calls per stock per timeframe.
-
-    If TAAPI rejects the first call with a plan-restriction 403, a TaapiPlanError
-    is raised immediately so the caller can abort all remaining calls for this ticker.
-    """
-    bundle = RawIndicatorBundle(ticker=ticker, interval=interval)
-
-    # ── RSI ──────────────────────────────────────────────────────────────────
-    # TaapiPlanError propagates up — no need to catch here
-    data = _get_indicator("rsi", ticker, interval)
-    if data and "value" in data:
-        bundle.rsi = float(data["value"])
-    else:
-        bundle.fetch_errors.append("rsi")
-
-    # ── MACD ──────────────────────────────────────────────────────────────────
-    data = _get_indicator("macd", ticker, interval)
-    if data:
-        bundle.macd_value     = _safe_float(data, "valueMACD")
-        bundle.macd_signal    = _safe_float(data, "valueMACDSignal")
-        bundle.macd_histogram = _safe_float(data, "valueMACDHist")
-        if bundle.macd_value is None:
-            bundle.fetch_errors.append("macd")
-    else:
-        bundle.fetch_errors.append("macd")
-
-    # ── SMA (20-period) ────────────────────────────────────────────────────────
-    data = _get_indicator("sma", ticker, interval, {"period": config.SMA_PERIOD})
-    if data and "value" in data:
-        bundle.sma_20 = float(data["value"])
-    else:
-        bundle.fetch_errors.append("sma")
-
-    # ── EMA (20-period) ────────────────────────────────────────────────────────
-    data = _get_indicator("ema", ticker, interval, {"period": config.EMA_PERIOD})
-    if data and "value" in data:
-        bundle.ema_20 = float(data["value"])
-    else:
-        bundle.fetch_errors.append("ema")
-
-    # ── Bollinger Bands ────────────────────────────────────────────────────────
-    data = _get_indicator("bbands", ticker, interval)
-    if data:
-        bundle.bb_upper  = _safe_float(data, "valueUpperBand")
-        bundle.bb_middle = _safe_float(data, "valueMiddleBand")
-        bundle.bb_lower  = _safe_float(data, "valueLowerBand")
-        if bundle.bb_upper is None:
-            bundle.fetch_errors.append("bbands")
-    else:
-        bundle.fetch_errors.append("bbands")
-
-    # ── Stochastic ─────────────────────────────────────────────────────────────
-    data = _get_indicator("stoch", ticker, interval)
-    if data:
-        # TAAPI uses "valueFastK" / "valueFastD" OR "valueK" / "valueD" depending on plan
-        bundle.stoch_k = _safe_float(data, "valueFastK") or _safe_float(data, "valueK")
-        bundle.stoch_d = _safe_float(data, "valueFastD") or _safe_float(data, "valueD")
-        if bundle.stoch_k is None:
-            bundle.fetch_errors.append("stoch")
-    else:
-        bundle.fetch_errors.append("stoch")
-
-    # ── ATR ────────────────────────────────────────────────────────────────────
-    data = _get_indicator("atr", ticker, interval)
-    if data and "value" in data:
-        bundle.atr = float(data["value"])
-    else:
-        bundle.fetch_errors.append("atr")
-
-    # ── ADX ────────────────────────────────────────────────────────────────────
-    data = _get_indicator("adx", ticker, interval)
-    if data and "value" in data:
-        bundle.adx = float(data["value"])
-    else:
-        bundle.fetch_errors.append("adx")
-
-    # ── OBV ────────────────────────────────────────────────────────────────────
-    data = _get_indicator("obv", ticker, interval)
-    if data and "value" in data:
-        bundle.obv = float(data["value"])
-    else:
-        bundle.fetch_errors.append("obv")
-
-    # ── Candle (close price + volume) ──────────────────────────────────────────
-    data = _get_indicator("candle", ticker, interval)
-    if data:
-        bundle.close  = _safe_float(data, "close")
-        bundle.volume = _safe_float(data, "volume")
-        if bundle.close is None:
-            bundle.fetch_errors.append("candle")
-    else:
-        bundle.fetch_errors.append("candle")
-
-    if bundle.fetch_errors:
-        logger.info("Fetch errors for %s/%s: %s", ticker, interval, bundle.fetch_errors)
-
-    return bundle
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BULK ENDPOINT (Pro plan)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _fetch_bulk(ticker: str, interval: str) -> RawIndicatorBundle:
-    """
-    Fetch all indicators in a single POST /bulk request.
-    Requires a TAAPI Pro subscription. Much faster than individual calls.
-    """
-    bundle = RawIndicatorBundle(ticker=ticker, interval=interval)
-
-    payload = {
-        "secret": config.TAAPI_SECRET,
-        "construct": {
-            "exchange": config.TAAPI_EXCHANGE,
-            "symbol":   _taapi_symbol(ticker),
-            "interval": interval,
-            "indicators": [
-                {"indicator": "rsi",    "id": "rsi"},
-                {"indicator": "macd",   "id": "macd"},
-                {"indicator": "sma",    "id": "sma",    "period": config.SMA_PERIOD},
-                {"indicator": "ema",    "id": "ema",    "period": config.EMA_PERIOD},
-                {"indicator": "bbands", "id": "bbands"},
-                {"indicator": "stoch",  "id": "stoch"},
-                {"indicator": "atr",    "id": "atr"},
-                {"indicator": "adx",    "id": "adx"},
-                {"indicator": "obv",    "id": "obv"},
-                {"indicator": "candle", "id": "candle"},
-            ],
-        },
-    }
-
-    url = f"{config.TAAPI_BASE_URL}/bulk"
-    logger.debug("POST /bulk | ticker=%s interval=%s", ticker, interval)
-
-    try:
-        resp = _get_session().post(
-            url,
-            json=payload,
-            timeout=config.TAAPI_TIMEOUT_SECONDS * 2,
-        )
-        if resp.status_code != 200:
-            logger.warning("Bulk endpoint returned HTTP %d for %s", resp.status_code, ticker)
-            # Fall back to individual calls
-            return _fetch_free_tier(ticker, interval)
-
-        results = resp.json().get("data", [])
-        result_map = {item["id"]: item.get("result", {}) for item in results}
-
-        # Parse each indicator from the bulk response
-        if "rsi" in result_map:
-            bundle.rsi = _safe_float(result_map["rsi"], "value")
-        if "macd" in result_map:
-            d = result_map["macd"]
-            bundle.macd_value     = _safe_float(d, "valueMACD")
-            bundle.macd_signal    = _safe_float(d, "valueMACDSignal")
-            bundle.macd_histogram = _safe_float(d, "valueMACDHist")
-        if "sma" in result_map:
-            bundle.sma_20 = _safe_float(result_map["sma"], "value")
-        if "ema" in result_map:
-            bundle.ema_20 = _safe_float(result_map["ema"], "value")
-        if "bbands" in result_map:
-            d = result_map["bbands"]
-            bundle.bb_upper  = _safe_float(d, "valueUpperBand")
-            bundle.bb_middle = _safe_float(d, "valueMiddleBand")
-            bundle.bb_lower  = _safe_float(d, "valueLowerBand")
-        if "stoch" in result_map:
-            d = result_map["stoch"]
-            bundle.stoch_k = _safe_float(d, "valueFastK") or _safe_float(d, "valueK")
-            bundle.stoch_d = _safe_float(d, "valueFastD") or _safe_float(d, "valueD")
-        if "atr" in result_map:
-            bundle.atr = _safe_float(result_map["atr"], "value")
-        if "adx" in result_map:
-            bundle.adx = _safe_float(result_map["adx"], "value")
-        if "obv" in result_map:
-            bundle.obv = _safe_float(result_map["obv"], "value")
-        if "candle" in result_map:
-            bundle.close  = _safe_float(result_map["candle"], "close")
-            bundle.volume = _safe_float(result_map["candle"], "volume")
-
-    except requests.exceptions.RequestException as exc:
-        logger.warning("Bulk fetch failed for %s: %s — falling back to individual calls", ticker, exc)
-        return _fetch_free_tier(ticker, interval)
-
-    return bundle
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # MOCK FETCH
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _fetch_mock(ticker: str, interval: str) -> RawIndicatorBundle:
-    """
-    Return pre-built sample data without making any API calls.
-    Used when MOCK_MODE=True.
-    """
+    """Return pre-built sample data without making any network calls."""
     ticker_upper = ticker.upper()
     if ticker_upper in _MOCK_DATA and interval in _MOCK_DATA[ticker_upper]:
         raw = _MOCK_DATA[ticker_upper][interval]
     elif ticker_upper in _MOCK_DATA:
-        # Use any available interval as fallback with slight variation
         any_interval = next(iter(_MOCK_DATA[ticker_upper]))
         raw = _MOCK_DATA[ticker_upper][any_interval]
         logger.debug("Mock: no interval %s for %s, using %s", interval, ticker, any_interval)
@@ -664,74 +271,8 @@ def _fetch_mock(ticker: str, interval: str) -> RawIndicatorBundle:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PUBLIC INTERFACE
-# ─────────────────────────────────────────────────────────────────────────────
-
-def fetch_indicators(ticker: str, interval: str) -> RawIndicatorBundle:
-    """
-    Fetch all technical indicators for a stock at a given timeframe.
-
-    This is the only function you need to call from outside this module.
-    It automatically routes to mock / bulk / free-tier based on config settings.
-
-    Args:
-        ticker:   Stock symbol, e.g. "AAPL"
-        interval: Timeframe code, e.g. "1d" (daily), "4h" (4-hour)
-
-    Returns:
-        RawIndicatorBundle with all available indicator values.
-        Never raises — any failures are recorded in bundle.fetch_errors.
-        If the API key lacks permission for US stocks, fetch_errors will contain
-        "plan_restriction" and the error message will explain the upgrade path.
-    """
-    ticker = ticker.upper().strip()
-
-    if config.MOCK_MODE:
-        logger.debug("Mock mode: returning sample data for %s/%s", ticker, interval)
-        return _fetch_mock(ticker, interval)
-
-    # ── yfinance path (default) ───────────────────────────────────────────────
-    if config.DATA_SOURCE != "taapi":
-        logger.debug("yfinance: fetching %s/%s", ticker, interval)
-        return _fetch_yfinance(ticker, interval)
-
-    # ── TAAPI path (explicit opt-in via DATA_SOURCE=taapi) ────────────────────
-    if not config.TAAPI_SECRET:
-        logger.error(
-            "DATA_SOURCE=taapi but TAAPI_SECRET is not set. "
-            "Either set TAAPI_SECRET in .env or switch to DATA_SOURCE=yfinance."
-        )
-        return RawIndicatorBundle(
-            ticker=ticker, interval=interval,
-            fetch_errors=["no_api_key"]
-        )
-
-    try:
-        if config.USE_BULK_API:
-            logger.debug("TAAPI bulk: fetching %s/%s", ticker, interval)
-            return _fetch_bulk(ticker, interval)
-
-        logger.debug("TAAPI free-tier: fetching %s/%s", ticker, interval)
-        return _fetch_free_tier(ticker, interval)
-
-    except TaapiPlanError as exc:
-        logger.error(
-            "Plan restriction for %s/%s — stopping all calls for this ticker. %s",
-            ticker, interval, exc,
-        )
-        return RawIndicatorBundle(
-            ticker=ticker,
-            interval=interval,
-            fetch_errors=["plan_restriction"],
-        )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # YFINANCE BACKEND
 # ─────────────────────────────────────────────────────────────────────────────
-# Uses Yahoo Finance (via yfinance) + local indicator computation (ta library).
-# Free, no API key, no meaningful rate limits.
-# Data is ~15 min delayed — fine for daily/4h swing trading.
 
 try:
     import yfinance as _yf
@@ -740,16 +281,14 @@ try:
 except ImportError:
     _YFINANCE_AVAILABLE = False
 
-
-# Map TAAPI-style interval codes → (yfinance period, yfinance interval, resample rule)
-# "resample rule" is non-None when we download at a finer granularity and aggregate.
-# yfinance does not offer a native 4h interval for stocks, so we download 1h and resample.
+# Map interval codes → (yfinance period, yfinance interval, resample rule)
+# yfinance has no native 4h stock bars; we download 1h and resample.
 _YF_INTERVAL_MAP: Dict[str, tuple] = {
-    "1d":  ("3mo",  "1d",   None),   # 90 days of daily bars
-    "4h":  ("60d",  "1h",   "4h"),   # 60 days of 1h bars, resampled to 4h
-    "1h":  ("7d",   "1h",   None),
-    "1w":  ("1y",   "1wk",  None),
-    "15m": ("5d",   "15m",  None),
+    "1d":  ("3mo",  "1d",  None),
+    "4h":  ("60d",  "1h",  "4h"),
+    "1h":  ("7d",   "1h",  None),
+    "1w":  ("1y",   "1wk", None),
+    "15m": ("5d",   "15m", None),
 }
 
 
@@ -759,7 +298,6 @@ def _last(series) -> Optional[float]:
         if series is None or series.empty:
             return None
         val = series.iloc[-1]
-        import math
         return None if (val != val or math.isnan(val)) else float(val)
     except Exception:
         return None
@@ -767,15 +305,12 @@ def _last(series) -> Optional[float]:
 
 def _fetch_yfinance(ticker: str, interval: str) -> RawIndicatorBundle:
     """
-    Fetch OHLCV data from Yahoo Finance and compute all indicators locally
+    Download OHLCV data from Yahoo Finance and compute all indicators locally
     using the `ta` library. Returns a fully populated RawIndicatorBundle.
-
-    This is a drop-in replacement for the TAAPI free-tier path — it produces
-    the same RawIndicatorBundle shape, so nothing else in the pipeline changes.
 
     Args:
         ticker:   Stock symbol, e.g. "AAPL"
-        interval: TAAPI-style interval code, e.g. "1d" or "4h"
+        interval: Timeframe code, e.g. "1d" or "4h"
     """
     bundle = RawIndicatorBundle(ticker=ticker, interval=interval)
 
@@ -800,10 +335,8 @@ def _fetch_yfinance(ticker: str, interval: str) -> RawIndicatorBundle:
             bundle.fetch_errors.append("no_data")
             return bundle
 
-        # Normalise column names to lowercase
         hist.columns = [c.lower() for c in hist.columns]
 
-        # Resample 1h → 4h when needed (yfinance has no native 4h stock bars)
         if resample_rule:
             hist = hist.resample(resample_rule).agg({
                 "open":   "first",
@@ -818,23 +351,19 @@ def _fetch_yfinance(ticker: str, interval: str) -> RawIndicatorBundle:
                 "yfinance: only %d bars for %s/%s — need ≥30 for reliable indicators",
                 len(hist), ticker, interval,
             )
-            # Still proceed — partial data is better than none
 
         close  = hist["close"]
         high   = hist["high"]
         low    = hist["low"]
         volume = hist["volume"]
 
-        # ── Current snapshot ──────────────────────────────────────────────
         bundle.close  = float(close.iloc[-1])
         bundle.volume = float(volume.iloc[-1])
 
-        # ── RSI ───────────────────────────────────────────────────────────
         bundle.rsi = _last(_ta.momentum.RSIIndicator(close, window=14).rsi())
         if bundle.rsi is None:
             bundle.fetch_errors.append("rsi")
 
-        # ── MACD ──────────────────────────────────────────────────────────
         macd = _ta.trend.MACD(close, window_slow=26, window_fast=12, window_sign=9)
         bundle.macd_value     = _last(macd.macd())
         bundle.macd_signal    = _last(macd.macd_signal())
@@ -842,41 +371,33 @@ def _fetch_yfinance(ticker: str, interval: str) -> RawIndicatorBundle:
         if bundle.macd_value is None:
             bundle.fetch_errors.append("macd")
 
-        # ── SMA / EMA ─────────────────────────────────────────────────────
         bundle.sma_20 = _last(_ta.trend.SMAIndicator(close, window=20).sma_indicator())
         bundle.ema_20 = _last(_ta.trend.EMAIndicator(close, window=20).ema_indicator())
 
-        # ── Bollinger Bands ───────────────────────────────────────────────
         bb = _ta.volatility.BollingerBands(close, window=20, window_dev=2)
         bundle.bb_upper  = _last(bb.bollinger_hband())
         bundle.bb_middle = _last(bb.bollinger_mavg())
         bundle.bb_lower  = _last(bb.bollinger_lband())
 
-        # ── Stochastic ────────────────────────────────────────────────────
         stoch = _ta.momentum.StochasticOscillator(high, low, close, window=14, smooth_window=3)
         bundle.stoch_k = _last(stoch.stoch())
         bundle.stoch_d = _last(stoch.stoch_signal())
 
-        # ── ATR ───────────────────────────────────────────────────────────
         bundle.atr = _last(_ta.volatility.AverageTrueRange(high, low, close, window=14).average_true_range())
         if bundle.atr is None:
             bundle.fetch_errors.append("atr")
 
-        # ── ADX ───────────────────────────────────────────────────────────
         bundle.adx = _last(_ta.trend.ADXIndicator(high, low, close, window=14).adx())
         if bundle.adx is None:
             bundle.fetch_errors.append("adx")
 
-        # ── OBV ───────────────────────────────────────────────────────────
         bundle.obv = _last(_ta.volume.OnBalanceVolumeIndicator(close, volume).on_balance_volume())
 
         logger.debug(
             "yfinance %s/%s: close=%.2f rsi=%.1f atr=%.2f adx=%.1f bars=%d",
             ticker, interval,
-            bundle.close or 0,
-            bundle.rsi or 0,
-            bundle.atr or 0,
-            bundle.adx or 0,
+            bundle.close or 0, bundle.rsi or 0,
+            bundle.atr or 0, bundle.adx or 0,
             len(hist),
         )
 
@@ -888,104 +409,28 @@ def _fetch_yfinance(ticker: str, interval: str) -> RawIndicatorBundle:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SYMBOL LIST
+# PUBLIC INTERFACE
 # ─────────────────────────────────────────────────────────────────────────────
 
-# In-memory cache — populated on first call to fetch_all_symbols()
-_symbols_cache: Optional[List[str]] = None
-
-
-def fetch_all_symbols() -> List[str]:
+def fetch_indicators(ticker: str, interval: str) -> RawIndicatorBundle:
     """
-    Return the complete list of US stock symbols available on TAAPI.
+    Fetch all technical indicators for a stock at a given timeframe.
 
-    In mock mode: reads the bundled all_symbols.json file (no internet needed).
-    In live mode: calls GET /exchange-symbols once and caches the result for the
-                  rest of the process lifetime.
+    Routes to mock data or Yahoo Finance depending on MOCK_MODE.
+
+    Args:
+        ticker:   Stock symbol, e.g. "AAPL"
+        interval: Timeframe code, e.g. "1d" (daily), "4h" (4-hour)
 
     Returns:
-        List of ticker strings, e.g. ["AAPL", "MSFT", "NVDA", ...]
-
-    Never raises — falls back to the bundled list on any network error.
+        RawIndicatorBundle with all available indicator values.
+        Never raises — any failures are recorded in bundle.fetch_errors.
     """
-    global _symbols_cache
-    if _symbols_cache is not None:
-        return _symbols_cache
+    ticker = ticker.upper().strip()
 
     if config.MOCK_MODE:
-        _symbols_cache = _load_bundled_symbols()
-        logger.info("Mock mode: loaded %d symbols from all_symbols.json", len(_symbols_cache))
-        return _symbols_cache
+        logger.debug("Mock mode: returning sample data for %s/%s", ticker, interval)
+        return _fetch_mock(ticker, interval)
 
-    if not config.TAAPI_SECRET:
-        logger.warning("No TAAPI_SECRET — cannot fetch symbol list; using bundled list.")
-        _symbols_cache = _load_bundled_symbols()
-        return _symbols_cache
-
-    _rate_limit()
-    url    = f"{config.TAAPI_BASE_URL}/exchange-symbols"
-    params = {"secret": config.TAAPI_SECRET, "type": "stocks"}
-    logger.info("Fetching symbol list from TAAPI …")
-
-    try:
-        resp = _get_session().get(url, params=params, timeout=config.TAAPI_TIMEOUT_SECONDS)
-        if resp.status_code == 200:
-            data = resp.json()
-            # API returns either a plain list or {"data": [...]}
-            raw = data if isinstance(data, list) else data.get("data", [])
-            _symbols_cache = sorted(str(s).upper().strip() for s in raw if s)
-            logger.info("Fetched %d symbols from TAAPI exchange-symbols endpoint", len(_symbols_cache))
-            return _symbols_cache
-        else:
-            logger.warning(
-                "exchange-symbols returned HTTP %d — falling back to bundled list",
-                resp.status_code,
-            )
-    except requests.exceptions.RequestException as exc:
-        logger.warning("Failed to fetch symbol list: %s — using bundled list", exc)
-
-    _symbols_cache = _load_bundled_symbols()
-    return _symbols_cache
-
-
-def _load_bundled_symbols() -> List[str]:
-    """
-    Load the bundled all_symbols.json file that ships with the project.
-    Falls back to tickers.json, then the five mock tickers, if not found.
-    """
-    here = os.path.dirname(os.path.abspath(__file__))
-    for fname in ("all_symbols.json", "tickers.json"):
-        path = os.path.join(here, fname)
-        try:
-            with open(path) as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                return [str(s).upper() for s in data if s]
-        except Exception:
-            pass
-    # Ultimate fallback: just the five built-in mock tickers
-    return list(_MOCK_DATA.keys())
-
-
-def clear_symbols_cache() -> None:
-    """Force the next call to fetch_all_symbols() to re-fetch from TAAPI."""
-    global _symbols_cache
-    _symbols_cache = None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _safe_float(data: Dict[str, Any], key: str) -> Optional[float]:
-    """
-    Safely extract a float from a dict.
-    Returns None if the key is missing or the value cannot be converted.
-    """
-    val = data.get(key)
-    if val is None:
-        return None
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return None
+    logger.debug("yfinance: fetching %s/%s", ticker, interval)
+    return _fetch_yfinance(ticker, interval)

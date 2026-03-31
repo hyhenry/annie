@@ -38,7 +38,7 @@ import config
 from portfolio import Holding, Portfolio, load_portfolio, save_portfolio
 from portfolio_monitor import HoldingReport, monitor_portfolio, reports_to_json as holding_reports_to_json
 from engine import load_tickers, reports_to_json as scan_reports_to_json
-from taapi_client import fetch_all_symbols
+from universe import get_sectors, get_tickers_for_sectors
 from db import (
     save_scan, load_latest_scan, list_scans, load_scan_by_id,
     create_scan_job, get_active_job, get_job, cancel_job,
@@ -146,28 +146,6 @@ _init_state()
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _check_plan_restriction(results) -> None:
-    """
-    Show a clear error banner if any result indicates a TAAPI plan restriction.
-    The free tier only covers crypto — US stocks require a paid plan.
-    """
-    if not results:
-        return
-    hit = any(
-        r.error == "plan_restriction" or "plan_restriction" in (r.filter_failures or [])
-        for r in results
-    )
-    if hit:
-        st.error(
-            "**TAAPI plan does not support US stocks.**\n\n"
-            "The free tier is limited to crypto (BTC/USDT, ETH/USDT, etc.) on Binance. "
-            "To scan US equities you need a paid plan.\n\n"
-            "**Options:**\n"
-            "- Enable **Mock Mode** (toggle in sidebar) to explore with built-in sample data — no API key needed.\n"
-            "- Upgrade your TAAPI plan at [taapi.io/pricing](https://taapi.io/pricing/).",
-            icon="🔒",
-        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -532,7 +510,6 @@ def render_scanner_tab():
                 st.session_state.scan_meta     = None
                 st.session_state.last_scan_run = job["updated_at"]
             st.session_state.active_job_id = None
-            _check_plan_restriction(partial or [])
         elif job and job["status"] == "error":
             st.error(f"Scan failed: {job['error']}")
             st.session_state.active_job_id = None
@@ -543,36 +520,78 @@ def render_scanner_tab():
     # ── Input + launch controls ───────────────────────────────────────────────
     st.caption("Scans run in the background — close this tab and come back any time.")
 
-    col_input, col_run = st.columns([3, 1])
+    filter_buy_only = False
+    min_score = 0
 
-    with col_input:
-        ticker_input = st.text_area(
-            "Tickers to scan",
-            value=", ".join(load_tickers()),
-            height=80,
-            help="Comma-separated or one per line. Example: AAPL, MSFT, NVDA",
-            placeholder="AAPL, MSFT, NVDA, GOOGL …",
-        )
+    scan_mode = st.radio(
+        "Scan mode",
+        ["Custom tickers", "By sector (S&P 500 + NASDAQ 100)"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
 
-    with col_run:
-        st.markdown("<br>", unsafe_allow_html=True)
-        run_scan = st.button("▶  Run Scan",       type="primary",   use_container_width=True)
-        scan_all = st.button("🌐 Scan All Stocks", type="secondary", use_container_width=True,
-                             help="Score all ~467 US stocks. Runs in the background.")
-        filter_buy_only = st.checkbox("Buy only", value=False)
-        min_score = st.slider("Min score", 0, 100, 0, 5)
+    if scan_mode == "Custom tickers":
+        col_input, col_run = st.columns([3, 1])
+        with col_input:
+            ticker_input = st.text_area(
+                "Tickers to scan",
+                value=", ".join(load_tickers()),
+                height=80,
+                help="Comma-separated or one per line. Example: AAPL, MSFT, NVDA",
+                placeholder="AAPL, MSFT, NVDA, GOOGL …",
+            )
+        with col_run:
+            st.markdown("<br>", unsafe_allow_html=True)
+            run_scan = st.button("▶  Run Scan", type="primary", use_container_width=True)
+            filter_buy_only = st.checkbox("Buy only", value=False)
+            min_score = st.slider("Min score", 0, 100, 0, 5)
 
-    if run_scan:
-        raw_tickers = [t.strip().upper() for t in ticker_input.replace("\n", ",").split(",") if t.strip()]
-        if not raw_tickers:
-            st.warning("Enter at least one ticker symbol.")
+        if run_scan:
+            raw_tickers = [t.strip().upper() for t in ticker_input.replace("\n", ",").split(",") if t.strip()]
+            if not raw_tickers:
+                st.warning("Enter at least one ticker symbol.")
+            else:
+                _start_scan(raw_tickers)
+                st.rerun()
+
+    else:
+        # Sector picker
+        try:
+            all_sectors = get_sectors()
+        except Exception:
+            all_sectors = []
+
+        col_sectors, col_run = st.columns([3, 1])
+        with col_sectors:
+            selected_sectors = st.multiselect(
+                "Sectors to scan",
+                options=all_sectors,
+                default=[],
+                placeholder="Leave empty to scan all sectors",
+                help="Select one or more sectors. Leave empty to scan the full universe.",
+            )
+        with col_run:
+            st.markdown("<br>", unsafe_allow_html=True)
+            scan_sector = st.button("▶  Scan Sector", type="primary", use_container_width=True)
+            filter_buy_only = st.checkbox("Buy only", value=False)
+            min_score = st.slider("Min score", 0, 100, 0, 5)
+
+        ticker_count_label = ""
+        if not all_sectors:
+            st.warning("Could not load sector universe — check your internet connection.")
         else:
-            _start_scan(raw_tickers)
-            st.rerun()
+            tickers_preview = get_tickers_for_sectors(selected_sectors)
+            sector_label = ", ".join(selected_sectors) if selected_sectors else "all sectors"
+            ticker_count_label = f"{len(tickers_preview)} tickers from {sector_label}"
+            st.caption(ticker_count_label)
 
-    if scan_all:
-        _start_scan(fetch_all_symbols())
-        st.rerun()
+        if scan_sector:
+            sector_tickers = get_tickers_for_sectors(selected_sectors)
+            if not sector_tickers:
+                st.warning("No tickers found for the selected sectors.")
+            else:
+                _start_scan(sector_tickers)
+                st.rerun()
 
     # ── Results ───────────────────────────────────────────────────────────────
     results = st.session_state.scan_results

@@ -14,9 +14,6 @@ ta>=0.11.0
 
 # ── Core ──────────────────────────────────────────────────────────────────────
 
-# HTTP client — used to call the TAAPI.io API (only needed if DATA_SOURCE=taapi)
-requests==2.31.0
-
 # Loads environment variables from a .env file into os.environ
 python-dotenv==1.0.0
 
