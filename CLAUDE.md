@@ -1,0 +1,77 @@
+# Annie — Claude Context
+
+## What this project is
+A multifactor swing-trade scoring and portfolio monitoring engine. Fetches market data, computes technical indicators, and produces Buy/Watch/Avoid scores (scanner) and Hold/Trim/Sell recommendations (portfolio monitor). Streamlit web UI + argparse CLI.
+
+## Running the app
+```bash
+# Web UI (live data, no API key needed)
+streamlit run app.py
+
+# Web UI with mock data
+MOCK_MODE=true streamlit run app.py
+
+# CLI scanner
+python main.py --tickers AAPL,MSFT,NVDA
+python main.py --mock --all --only-buy --top 10
+python main.py --help
+
+# Tests
+python -m pytest tests/ -v
+```
+
+## File map
+| File | Role |
+|---|---|
+| `config.py` | Single source of truth for all weights, thresholds, settings |
+| `taapi_client.py` | Data fetching: yfinance (default) or TAAPI. Returns `RawIndicatorBundle` |
+| `indicators.py` | Parses `RawIndicatorBundle` → `IndicatorData`; normalises each indicator 0-100 |
+| `scoring.py` | Weighted factor scores → Opportunity Score + Buy/Watch/Avoid |
+| `risk.py` | ATR-based stop-loss, take-profit, position sizing → `TradePlan` |
+| `engine.py` | Orchestrates scanner pipeline per ticker; returns `StockReport` list |
+| `main.py` | CLI entry point (argparse, JSON to stdout) |
+| `portfolio.py` | `Holding` / `Portfolio` dataclasses; JSON read/write |
+| `hold_scoring.py` | Hold Quality Score + Sell Risk Score models |
+| `portfolio_monitor.py` | Orchestrates portfolio analysis; returns `HoldingReport` list |
+| `scan_worker.py` | Detached subprocess: runs scans async, writes progress to SQLite per ticker |
+| `db.py` | SQLite persistence: `scans` history table + `scan_jobs` live progress table |
+| `app.py` | Streamlit frontend (4 tabs: Portfolio, Scanner, Manage, Settings) |
+| `portfolio.json` | User's holdings (edited via Manage tab or directly) |
+| `all_symbols.json` | 467 TAAPI US stock symbols (used by Scan All) |
+| `tickers.json` | Default short ticker list for Scanner tab |
+| `tests/test_scoring.py` | 83 unit tests — all passing |
+
+## Architecture decisions
+
+**Data source:** `yfinance` + `ta` library by default — free, no API key, computes all indicators locally from OHLCV data. TAAPI is an opt-in via `DATA_SOURCE=taapi` in `.env` (requires paid Basic+ plan; their free tier is crypto-only).
+
+**Async scans:** Clicking "Run Scan" spawns `scan_worker.py` as a detached subprocess (`start_new_session=True`) so it survives browser close. Worker writes `done_count`, `current_ticker`, and partial results to `scan_jobs` table after every ticker. App polls DB every 3s and shows progress bar + partial results table + ETA. Cancel button sets `status='cancelled'`; worker checks before each ticker.
+
+**SQLite schema:**
+- `scans` — completed scan history (up to 10 rows, pruned automatically). Loaded on app startup for instant display.
+- `scan_jobs` — one row per async run with `status` (pending→running→complete|error|cancelled), `done_count`, `current_ticker`, `partial_results` JSON.
+
+**Scoring models:**
+- *Opportunity Score* (scanner): 7 weighted factors — trend 25%, momentum 20%, volume 15%, entry timing 15%, volatility 10%, multi-timeframe 10%, risk penalty 5%. Buy ≥80, Watch ≥60, Avoid <60.
+- *Hold Quality Score* (portfolio): trend integrity 30%, momentum health 25%, volume support 20%, technical position 15%, multi-timeframe 10%.
+- *Sell Risk Score* (portfolio): additive penalties. Sell ≥70, Trim ≥50, Watch Closely ≥30, Hold <30.
+
+**4h timeframe:** yfinance has no native 4h stock bars. We download 1h bars and resample with pandas `.resample("4h").agg(OHLCV)`.
+
+**Mock data:** 6 pre-built scenarios in `taapi_client._MOCK_DATA` — AAPL (Buy ~85), MSFT (Watch ~80), NVDA (Watch ~78), TSLA (Watch/Trim), AMC (Avoid/Sell), SNDL (auto-Avoid, price filter). All other tickers in mock mode get a neutral fallback (Watch ~50).
+
+## Key config knobs (config.py / .env)
+| Setting | Default | Effect |
+|---|---|---|
+| `DATA_SOURCE` | `yfinance` | `taapi` to use TAAPI API instead |
+| `MOCK_MODE` | `false` | `true` for offline sample data |
+| `TAAPI_SECRET` | — | Required only if `DATA_SOURCE=taapi` |
+| `RISK_PER_TRADE_USD` | `500` | Position sizing budget per trade |
+| `TRAILING_STOP_DEFAULT_PCT` | `0.08` | Default trailing stop (8%) |
+| `MAX_POSITION_PCT` | `0.15` | Concentration limit (15% of portfolio) |
+| `ANNIE_DB_PATH` | `annie.db` | SQLite file location |
+
+## Environment
+- Python 3.11 at `/Library/Frameworks/Python.framework/Versions/3.11/bin/python3`
+- The Homebrew Python (`/opt/homebrew`) is a separate interpreter — IDE hints about missing packages can be ignored; packages are installed in the Framework Python
+- `annie.db` is gitignored (generated at runtime)
