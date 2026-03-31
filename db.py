@@ -74,6 +74,14 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             error           TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio_results (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            analyzed_at TEXT    NOT NULL,
+            mock_mode   INTEGER NOT NULL DEFAULT 0,
+            results     TEXT    NOT NULL   -- JSON list of serialised HoldingReport dicts
+        )
+    """)
     conn.commit()
 
 
@@ -449,4 +457,47 @@ def load_scan_by_id(scan_id: int) -> Optional[Dict[str, Any]]:
         }
     except Exception as exc:
         logger.warning("Failed to load scan %d from DB: %s", scan_id, exc)
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PORTFOLIO RESULTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def save_portfolio_results(reports_dicts: list, mock_mode: bool, analyzed_at: str) -> None:
+    """Persist the latest portfolio analysis results (overwrites — only one row kept)."""
+    try:
+        conn = _connect()
+        _ensure_schema(conn)
+        conn.execute("DELETE FROM portfolio_results")
+        conn.execute(
+            "INSERT INTO portfolio_results (analyzed_at, mock_mode, results) VALUES (?, ?, ?)",
+            (analyzed_at, int(mock_mode), json.dumps(reports_dicts)),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        logger.warning("Failed to save portfolio results: %s", exc)
+
+
+def load_portfolio_results() -> Optional[Dict[str, Any]]:
+    """Load the latest portfolio analysis results, or None if none saved."""
+    try:
+        if not os.path.exists(DB_PATH):
+            return None
+        conn = _connect()
+        _ensure_schema(conn)
+        row = conn.execute(
+            "SELECT analyzed_at, mock_mode, results FROM portfolio_results LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if row is None:
+            return None
+        return {
+            "analyzed_at": row["analyzed_at"],
+            "mock_mode":   bool(row["mock_mode"]),
+            "reports":     json.loads(row["results"]),
+        }
+    except Exception as exc:
+        logger.warning("Failed to load portfolio results: %s", exc)
         return None

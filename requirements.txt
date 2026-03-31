@@ -12,6 +12,14 @@ yfinance>=0.2.40
 # Technical indicator library — computes RSI, MACD, BB, Stoch, ATR, ADX, OBV, etc.
 ta>=0.11.0
 
+# ── Web API ───────────────────────────────────────────────────────────────────
+
+# FastAPI — REST API framework that replaces Streamlit
+fastapi>=0.111.0
+
+# Uvicorn — ASGI server to run FastAPI
+uvicorn[standard]>=0.29.0
+
 # ── Core ──────────────────────────────────────────────────────────────────────
 
 # Loads environment variables from a .env file into os.environ

@@ -5,11 +5,13 @@ A multifactor swing-trade scoring and portfolio monitoring engine. Fetches marke
 
 ## Running the app
 ```bash
-# Web UI (live data, no API key needed)
-streamlit run app.py
+# Web UI — production (build React first, then serve from FastAPI)
+cd frontend && npm run build && cd ..
+uvicorn api:app --port 8000
 
-# Web UI with mock data
-MOCK_MODE=true streamlit run app.py
+# Web UI — development (hot-reload React on :5173, FastAPI on :8000)
+uvicorn api:app --reload --port 8000 &
+cd frontend && npm run dev
 
 # CLI scanner
 python main.py --tickers AAPL,MSFT,NVDA
@@ -36,7 +38,9 @@ python -m pytest tests/ -v
 | `universe.py` | S&P 500 + NASDAQ 100 universe from Wikipedia; sector/industry metadata; 7-day SQLite cache |
 | `scan_worker.py` | Detached subprocess: runs scans async, writes progress to SQLite per ticker |
 | `db.py` | SQLite persistence: `scans` history table + `scan_jobs` live progress table |
-| `app.py` | Streamlit frontend (4 tabs: Portfolio, Scanner, Manage, Settings) |
+| `api.py` | FastAPI REST backend — all engine capabilities as JSON endpoints |
+| `app.py` | Legacy Streamlit frontend (kept for reference) |
+| `frontend/` | React + TypeScript + Vite + Tailwind UI — built to `frontend/dist/` |
 | `portfolio.json` | User's holdings (edited via Manage tab or directly) |
 | `tickers.json` | Default short ticker list for Scanner tab custom mode |
 | `tests/test_scoring.py` | 83 unit tests — all passing |
