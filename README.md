@@ -1,56 +1,51 @@
 # Annie — Stock Intelligence Engine
 
-A multifactor swing-trade scoring and portfolio monitoring engine built on [TAAPI.io](https://taapi.io) technical indicators. Runs fully offline with built-in mock data — no API key required to get started.
+A multifactor swing-trade scoring and portfolio monitoring engine. Fetches market data via **Yahoo Finance** (free, no API key), computes technical indicators locally, and produces Buy/Watch/Avoid scores plus portfolio Hold/Trim/Sell recommendations.
 
 ## Features
 
 - **Scanner** — Score any US stock 0-100 using 7 weighted technical factors (trend, momentum, volume, entry timing, volatility, multi-timeframe, risk penalty). Outputs Buy / Watch / Avoid with a full trade plan (entry, stop-loss, take-profit, position size).
 - **Portfolio Monitor** — Track existing holdings with a Hold Quality Score and Sell Risk Score. Generates Hold / Watch Closely / Trim / Sell / Take Profit recommendations with trailing stop management.
-- **Streamlit UI** — Four-tab web app: Portfolio dashboard, Scanner, Manage Holdings, Settings.
+- **React UI** — Single-page app (React + TypeScript + Tailwind) served by a FastAPI backend. Four tabs: Portfolio, Scanner, Manage Holdings, Settings.
 - **CLI** — JSON output to stdout; pipe into files or downstream tools.
-- **Mock mode** — Five pre-built scenarios (strong buy → auto-avoid) so the full engine works without any API key.
+- **Mock mode** — Five pre-built scenarios (strong buy → auto-avoid) so the full engine works offline without network access.
 
 ## Quickstart
 
 ```bash
-# 1. Install dependencies (Python 3.9+)
+# 1. Install Python dependencies
 pip install -r requirements.txt
 
-# 2. Run the scanner in mock mode (no API key needed)
+# 2. Run the scanner in mock mode (no network needed)
 python main.py --mock --verbose
 
-# 3. Launch the Streamlit app in mock mode
-MOCK_MODE=true streamlit run app.py
+# 3. Launch the web UI — production build
+cd frontend && npm run build && cd ..
+uvicorn api:app --port 8000
+# then open http://localhost:8000
+
+# 4. Launch the web UI — development (hot-reload)
+uvicorn api:app --reload --port 8000 &
+cd frontend && npm run dev
+# React on :5173, FastAPI on :8000
 ```
 
 ## Live Data — No API Key Required
 
-By default Annie uses **Yahoo Finance** (`yfinance`) as its data source. It's free, requires no account, and works for all US stocks immediately.
+Annie uses **Yahoo Finance** (`yfinance`) as its only data source. It's free, requires no account, and works for all US stocks immediately.
 
 ```bash
-# Live data works out of the box — just run it
-streamlit run app.py
+# Live data works out of the box
 python main.py --tickers AAPL,MSFT,NVDA
 ```
-
-### Optional: TAAPI.io
-
-If you have a TAAPI **Basic plan or higher**, you can switch to it via `DATA_SOURCE=taapi` in your `.env`. Note the free TAAPI tier only covers crypto (BTC/USDT etc.) — it will not work for US stocks.
-
-| Data source | API key needed | US stocks |
-|---|---|---|
-| `yfinance` (default) | No | Yes |
-| Mock mode | No | Yes (sample data) |
-| `taapi` free tier | Yes | **No** — crypto only |
-| `taapi` Basic+ | Yes | Yes |
 
 ## Project Structure
 
 ```
 annie/
 ├── config.py             # All weights, thresholds, and settings (single source of truth)
-├── taapi_client.py       # TAAPI HTTP client with rate limiting, retry, and mock data
-├── indicators.py         # Parse raw API response → IndicatorData; normalize each to 0-100
+├── market_data.py        # Data fetching: yfinance + local ta indicators → RawIndicatorBundle
+├── indicators.py         # Parse RawIndicatorBundle → IndicatorData; normalize each to 0-100
 ├── scoring.py            # Weighted factor scores → Opportunity Score + recommendation
 ├── risk.py               # ATR-based stop-loss, take-profit, and position sizing
 ├── engine.py             # Orchestrate full scanner pipeline; rank and sort results
@@ -60,7 +55,12 @@ annie/
 ├── hold_scoring.py       # Hold Quality Score + Sell Risk Score models
 ├── portfolio_monitor.py  # Orchestrate portfolio analysis; HoldingReport output
 │
-├── app.py                # Streamlit web frontend (4 tabs)
+├── api.py                # FastAPI backend — all engine capabilities as JSON endpoints
+├── universe.py           # S&P 500 + NASDAQ 100 universe; sector/industry metadata
+├── scan_worker.py        # Detached subprocess: async scans, writes progress to SQLite
+├── db.py                 # SQLite persistence: scan history + live progress tables
+│
+├── frontend/             # React + TypeScript + Vite + Tailwind UI (built to frontend/dist/)
 ├── portfolio.json        # Your portfolio (edited via the Manage tab or directly)
 ├── tickers.json          # Default ticker list for the scanner
 │
@@ -77,13 +77,15 @@ annie/
 |---|---|---|
 | Trend | 25% | Price vs SMA/EMA, ADX strength |
 | Momentum | 20% | MACD histogram, RSI (ideal zone: 40-65) |
-| Volume | 15% | OBV proxy + MA/MACD alignment |
+| Volume | 15% | Volume vs 20-MA ratio (live) or OBV proxy (mock) |
 | Entry Timing | 15% | Bollinger Band position, Stochastic %K |
 | Volatility | 10% | ATR% inversely scaled (lower = better) |
 | Multi-Timeframe | 10% | Daily vs 4h RSI/MACD/MA agreement |
 | Risk Penalty | 5% | Overbought, conflicting signals, missing data |
 
 **Recommendation bands:** Buy ≥ 80 · Watch ≥ 60 · Avoid < 60
+
+**Regime adjustment:** Factor weights shift dynamically based on ADX. In a strong trend (ADX ≥ 25) trend weight increases and entry-timing weight decreases. In a ranging market (ADX < 15) entry-timing and momentum weights increase.
 
 **Hard filters (auto-Avoid):** price < $5 · avg volume < 500K · ATR% > 8%
 

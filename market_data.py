@@ -1,5 +1,5 @@
 """
-taapi_client.py — Market data fetcher (yfinance backend).
+market_data.py — Market data fetcher (yfinance backend).
 
 Fetches raw technical indicator data for a stock at a given timeframe using
 Yahoo Finance (yfinance) and computes indicators locally with the `ta` library.
@@ -60,6 +60,7 @@ class RawIndicatorBundle:
 
     close:          Optional[float] = None
     volume:         Optional[float] = None
+    volume_sma_20:  Optional[float] = None   # 20-period SMA of volume (for volume_ratio)
 
     fetch_errors:   List[str] = field(default_factory=list)
 
@@ -392,6 +393,8 @@ def _fetch_yfinance(ticker: str, interval: str) -> RawIndicatorBundle:
             bundle.fetch_errors.append("adx")
 
         bundle.obv = _last(_ta.volume.OnBalanceVolumeIndicator(close, volume).on_balance_volume())
+
+        bundle.volume_sma_20 = _last(_ta.trend.SMAIndicator(volume.astype(float), window=20).sma_indicator())
 
         logger.debug(
             "yfinance %s/%s: close=%.2f rsi=%.1f atr=%.2f adx=%.1f bars=%d",

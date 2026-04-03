@@ -1,5 +1,5 @@
 """
-indicators.py — Parse raw TAAPI data and normalize each indicator to 0-100.
+indicators.py — Parse raw market data and normalize each indicator to 0-100.
 
 This module does two things:
     1. Converts a RawIndicatorBundle into a clean IndicatorData dataclass
@@ -26,7 +26,7 @@ import math
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from taapi_client import RawIndicatorBundle
+from market_data import RawIndicatorBundle
 import config
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ class IndicatorData:
     ticker:   str
     interval: str
 
-    # ── Raw indicator values (exactly as returned by TAAPI) ────────────────
+    # ── Raw indicator values ───────────────────────────────────────────────
     rsi:        Optional[float] = None
     macd:       Optional[dict]  = None   # {value, signal, histogram}
     adx:        Optional[float] = None
@@ -76,6 +76,12 @@ class IndicatorData:
     # 0.0 = at lower band, 0.5 = at middle, 1.0 = at upper band, >1.0 = extended
     bb_position: Optional[float] = None
 
+    # Current volume relative to its 20-period moving average.
+    # > 1.0 = above-average volume (confirms the move).
+    # < 1.0 = below-average volume (weak conviction).
+    # None when volume_sma_20 is unavailable (e.g. mock mode).
+    volume_ratio: Optional[float] = None
+
     # Fraction of critical indicators that returned data (0.0 to 1.0)
     # Used to compute the confidence score.
     data_completeness: float = 0.0
@@ -96,7 +102,7 @@ def parse_indicators(raw: RawIndicatorBundle) -> IndicatorData:
     calculates data_completeness.
 
     Args:
-        raw: The raw bundle returned by taapi_client.fetch_indicators()
+        raw: The raw bundle returned by market_data.fetch_indicators()
 
     Returns:
         IndicatorData ready for use by the scoring engine.
@@ -153,6 +159,11 @@ def parse_indicators(raw: RawIndicatorBundle) -> IndicatorData:
         data.price_above_sma = data.close > data.sma_20
     if data.close is not None and data.ema_20 is not None:
         data.price_above_ema = data.close > data.ema_20
+
+    # ── Derived: Volume relative to its 20-period MA ──────────────────────
+    if (raw.volume is not None and raw.volume_sma_20 is not None
+            and raw.volume_sma_20 > 0):
+        data.volume_ratio = raw.volume / raw.volume_sma_20
 
     # ── Derived: Bollinger Band position (0.0 to 1.0+) ────────────────────
     if (data.bbands is not None
@@ -527,59 +538,96 @@ def normalize_atr_pct(atr_pct: Optional[float]) -> float:
     return 0.0
 
 
+def normalize_volume_ratio(ratio: Optional[float]) -> float:
+    """
+    Volume ratio (current bar volume / 20-period volume MA) → 0-100 score.
+
+    When a stock moves on above-average volume, the move has conviction.
+    When price rises on shrinking volume, it is more likely to fail.
+
+    Plain English: Imagine a crowd cheering at a sports game. If more people
+    are cheering when the team scores (high volume on up moves), the win feels
+    more genuine. If the crowd stays quiet, the momentum may not last.
+
+    Scoring:
+        ≥ 1.5×  average: strong surge, confirms the move → 100
+        1.2-1.5×: above average, good confirmation → 80-100
+        0.8-1.2×: roughly average, neutral → 50-80
+        0.5-0.8×: below average, weak conviction → 20-50
+        < 0.5×  average: very thin volume, no conviction → 0-20
+    """
+    if ratio is None:
+        return 50.0  # no data = neutral
+
+    if ratio >= 1.5:
+        return 100.0
+
+    if ratio >= 1.2:
+        # 80 → 100 as ratio goes 1.2 → 1.5
+        return 80.0 + (ratio - 1.2) / 0.3 * 20.0
+
+    if ratio >= 0.8:
+        # 50 → 80 as ratio goes 0.8 → 1.2
+        return 50.0 + (ratio - 0.8) / 0.4 * 30.0
+
+    if ratio >= 0.5:
+        # 20 → 50 as ratio goes 0.5 → 0.8
+        return 20.0 + (ratio - 0.5) / 0.3 * 30.0
+
+    # Very thin volume (< 0.5× average): 0 → 20
+    return max(0.0, ratio / 0.5 * 20.0)
+
+
 def compute_obv_score(
     daily: "IndicatorData",
     h4: Optional["IndicatorData"] = None,
 ) -> float:
     """
-    OBV (On-Balance Volume) → 0-100 volume confirmation score.
+    Volume confirmation score → 0-100.
 
-    OBV adds volume on up days and subtracts it on down days. A rising OBV
-    confirms that buyers are stepping in with conviction. A falling OBV
-    during a price rise is a warning sign (price may be rising on thin air).
+    PRIMARY signal (when live data available):
+        volume_ratio = current volume / 20-period volume MA.
+        Above-average volume on a move = conviction. Thin volume = doubt.
 
-    Plain English: Imagine a boat rising in water. If the tide (volume) is
-    coming in (OBV rising), the boat will keep rising. If the tide is going
-    out, the boat will eventually drop even if it looks fine today.
+    FALLBACK signal (mock mode / no volume_sma_20):
+        OBV absolute sign (positive = cumulative buying > selling).
 
-    LIMITATION NOTE: TAAPI returns a single OBV value, not a historical
-    series. We cannot compute the slope directly. Instead, we use proxy
-    signals: OBV sign + price vs MA alignment + MACD direction.
-    The confidence score reflects this limitation.
+    Both paths use the same secondary signals: price vs MAs and MACD
+    histogram direction as additional confirmation.
+
+    Plain English: A stock rising on heavy volume is like a crowd sprinting —
+    there is genuine energy behind the move. A stock rising on thin volume is
+    like a slow shuffle — it may stop at any moment.
     """
     if daily is None:
         return 50.0
 
     score = 50.0  # start at neutral
 
-    # OBV sign: positive = more buying volume historically = bullish
-    if daily.obv is not None:
-        if daily.obv > 0:
-            score += 15.0
-        elif daily.obv < 0:
-            score -= 15.0
+    # ── PRIMARY: volume trend ─────────────────────────────────────────────
+    if daily.volume_ratio is not None:
+        # Actual volume-vs-MA ratio available (live yfinance data).
+        # Map normalize_volume_ratio (0-100) to a ±25 contribution.
+        vol_score = normalize_volume_ratio(daily.volume_ratio)
+        score += (vol_score - 50.0) * 0.5   # 0→-25, 50→0, 100→+25
+    elif daily.obv is not None:
+        # Fallback: OBV absolute sign (crude proxy, used in mock mode).
+        score += 15.0 if daily.obv > 0 else -15.0
 
-    # Price above moving averages (suggests OBV is likely rising with price)
+    # ── SECONDARY: price vs moving averages ───────────────────────────────
     if daily.price_above_sma is True and daily.price_above_ema is True:
         score += 20.0
     elif daily.price_above_sma is False and daily.price_above_ema is False:
         score -= 20.0
 
-    # MACD histogram positive = buying momentum = OBV likely rising
+    # ── TERTIARY: MACD histogram direction ────────────────────────────────
     if daily.macd and daily.macd.get("histogram") is not None:
         hist = daily.macd["histogram"]
-        if hist > 0:
-            score += 15.0
-        elif hist < 0:
-            score -= 15.0
+        score += 15.0 if hist > 0 else -15.0
 
-    # 4h OBV agreement (if available): extra confirmation
+    # ── 4h OBV cross-timeframe agreement ─────────────────────────────────
     if h4 is not None and h4.obv is not None and daily.obv is not None:
-        # Both positive or both negative = agreement
-        if (h4.obv > 0) == (daily.obv > 0):
-            score += 10.0
-        else:
-            score -= 5.0
+        score += 10.0 if (h4.obv > 0) == (daily.obv > 0) else -5.0
 
     return max(0.0, min(100.0, score))
 

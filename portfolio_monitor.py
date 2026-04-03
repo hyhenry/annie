@@ -2,7 +2,7 @@
 portfolio_monitor.py — Orchestration layer for portfolio monitoring.
 
 This module ties together all the components needed to evaluate existing holdings:
-    1. Fetch current indicator data for each holding (via taapi_client)
+    1. Fetch current indicator data for each holding (via market_data)
     2. Parse and enrich the data (via indicators)
     3. Compute Hold Quality Score and Sell Risk Score (via hold_scoring)
     4. Generate recommendation, explanation, and action items
@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 
 import config
 from portfolio import Holding, Portfolio, save_portfolio
-from taapi_client import fetch_indicators
+from market_data import fetch_indicators
 from indicators import parse_indicators, IndicatorData
 from hold_scoring import (
     compute_hold_quality_score,

@@ -7,8 +7,8 @@ gracefully, sorts results by score, and converts everything into the final
 JSON-serializable output format.
 
 Pipeline per ticker:
-    1. Fetch raw indicators (daily timeframe)  → taapi_client
-    2. Fetch raw indicators (4h timeframe)     → taapi_client
+    1. Fetch raw indicators (daily timeframe)  → market_data
+    2. Fetch raw indicators (4h timeframe)     → market_data
     3. Parse and enrich indicator data         → indicators
     4. Score the stock                         → scoring
     5. Build trade plan                        → risk
@@ -23,7 +23,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Any, Dict, List, Optional
 
 import config
-from taapi_client import fetch_indicators
+from market_data import fetch_indicators
 from indicators import parse_indicators, IndicatorData
 from scoring import score_ticker, ScoringResult
 from risk import build_trade_plan, TradePlan

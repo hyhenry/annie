@@ -1,7 +1,7 @@
 # Annie — Claude Context
 
 ## What this project is
-A multifactor swing-trade scoring and portfolio monitoring engine. Fetches market data, computes technical indicators, and produces Buy/Watch/Avoid scores (scanner) and Hold/Trim/Sell recommendations (portfolio monitor). Streamlit web UI + argparse CLI.
+A multifactor swing-trade scoring and portfolio monitoring engine. Fetches market data, computes technical indicators, and produces Buy/Watch/Avoid scores (scanner) and Hold/Trim/Sell recommendations (portfolio monitor). React + FastAPI web UI + argparse CLI.
 
 ## Running the app
 ```bash
@@ -26,7 +26,7 @@ python -m pytest tests/ -v
 | File | Role |
 |---|---|
 | `config.py` | Single source of truth for all weights, thresholds, settings |
-| `taapi_client.py` | Data fetching: yfinance + local `ta` indicators. Returns `RawIndicatorBundle` |
+| `market_data.py` | Data fetching: yfinance + local `ta` indicators. Returns `RawIndicatorBundle` |
 | `indicators.py` | Parses `RawIndicatorBundle` → `IndicatorData`; normalises each indicator 0-100 |
 | `scoring.py` | Weighted factor scores → Opportunity Score + Buy/Watch/Avoid |
 | `risk.py` | ATR-based stop-loss, take-profit, position sizing → `TradePlan` |
@@ -39,7 +39,6 @@ python -m pytest tests/ -v
 | `scan_worker.py` | Detached subprocess: runs scans async, writes progress to SQLite per ticker |
 | `db.py` | SQLite persistence: `scans` history table + `scan_jobs` live progress table |
 | `api.py` | FastAPI REST backend — all engine capabilities as JSON endpoints |
-| `app.py` | Legacy Streamlit frontend (kept for reference) |
 | `frontend/` | React + TypeScript + Vite + Tailwind UI — built to `frontend/dist/` |
 | `portfolio.json` | User's holdings (edited via Manage tab or directly) |
 | `tickers.json` | Default short ticker list for Scanner tab custom mode |
@@ -64,7 +63,7 @@ python -m pytest tests/ -v
 
 **4h timeframe:** yfinance has no native 4h stock bars. We download 1h bars and resample with pandas `.resample("4h").agg(OHLCV)`.
 
-**Mock data:** 6 pre-built scenarios in `taapi_client._MOCK_DATA` — AAPL (Buy ~85), MSFT (Watch ~80), NVDA (Watch ~78), TSLA (Watch/Trim), AMC (Avoid/Sell), SNDL (auto-Avoid, price filter). All other tickers in mock mode get a neutral fallback (Watch ~50).
+**Mock data:** 6 pre-built scenarios in `market_data._MOCK_DATA` — AAPL (Buy ~85), MSFT (Watch ~80), NVDA (Watch ~78), TSLA (Watch/Trim), AMC (Avoid/Sell), SNDL (auto-Avoid, price filter). All other tickers in mock mode get a neutral fallback (Watch ~50).
 
 ## Key config knobs (config.py / .env)
 | Setting | Default | Effect |

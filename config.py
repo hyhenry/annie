@@ -30,7 +30,7 @@ MOCK_MODE: bool = os.getenv("MOCK_MODE", "false").lower() == "true"
 # Think of it like getting a second opinion: if both the daily and 4-hour
 # charts say "buy", that is more convincing than just one.
 #
-# TAAPI interval codes: "1d" = daily, "4h" = 4-hour, "1h" = 1-hour, "1w" = weekly
+# Interval codes: "1d" = daily, "4h" = 4-hour, "1h" = 1-hour, "1w" = weekly
 
 INTERVALS: dict = {
     "primary":   "1d",   # Main analysis timeframe (daily chart)

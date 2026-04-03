@@ -39,6 +39,7 @@ from indicators import (
     normalize_bb_position,
     normalize_stochastic,
     normalize_atr_pct,
+    normalize_volume_ratio,
     compute_obv_score,
     compute_mtf_score,
 )
@@ -278,26 +279,86 @@ def _compute_penalty_score(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# REGIME-AWARE WEIGHT ADJUSTMENT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_regime_weights(adx: Optional[float]) -> dict:
+    """
+    Adjust factor weights based on the current market regime measured by ADX.
+
+    WHY THIS HELPS:
+        In a strong trending market (high ADX), the trend factor is highly
+        reliable and entry-timing mean-reversion signals become less important
+        — you want to buy pullbacks in the trend direction, not hunt for the
+        "perfect" Bollinger Band position.
+
+        In a weak / ranging market (low ADX), the opposite is true: trend
+        signals are noisy and price tends to oscillate, so oscillator-based
+        entry timing and momentum indicators carry more predictive weight.
+
+    IMPLEMENTATION:
+        We scale the shift linearly between the ADX thresholds so there are
+        no sudden jumps:
+          • ADX ≥ 25 (trending):  trend += up to +0.05, entry_timing -= up to 0.05
+          • ADX < 15 (ranging):   entry_timing += up to +0.03, momentum += up to +0.02,
+                                   trend -= up to 0.05
+          • ADX 15–25 (neutral):  no adjustment (use base config weights)
+
+    The weights still sum to the same total — this is a zero-sum shift
+    between factors, not an overall scale change.
+    """
+    weights = dict(config.FACTOR_WEIGHTS)
+
+    if adx is None:
+        return weights
+
+    if adx >= config.ADX_STRONG:  # 25+: confirmed trend
+        # Scale shift 0 → 0.05 as ADX moves from 25 → 40
+        t = min(1.0, (adx - config.ADX_STRONG) / (config.ADX_VERY_STRONG - config.ADX_STRONG))
+        shift = t * 0.05
+        weights["trend"]        = round(weights["trend"] + shift, 4)
+        weights["entry_timing"] = round(weights["entry_timing"] - shift, 4)
+
+    elif adx < config.ADX_WEAK:   # <15: ranging / choppy
+        # Scale shift 0 → 0.05 as ADX moves from 15 → 0
+        t = min(1.0, (config.ADX_WEAK - adx) / config.ADX_WEAK)
+        shift = t * 0.05
+        weights["entry_timing"] = round(weights["entry_timing"] + shift * 0.6, 4)
+        weights["momentum"]     = round(weights["momentum"] + shift * 0.4, 4)
+        weights["trend"]        = round(weights["trend"] - shift, 4)
+
+    return weights
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TOTAL SCORE CALCULATION
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_total_score(scores: FactorScores) -> tuple:
+def compute_total_score(scores: FactorScores, adx: Optional[float] = None) -> tuple:
     """
     Compute the final weighted score from factor scores.
 
     Formula:
-        raw_score = (trend × 0.25) + (momentum × 0.20) + (volume × 0.15)
-                  + (entry_timing × 0.15) + (volatility × 0.10)
+        raw_score = (trend × w_trend) + (momentum × w_momentum) + (volume × 0.15)
+                  + (entry_timing × w_entry_timing) + (volatility × 0.10)
                   + (multi_timeframe × 0.10)
+
+        Weights are the base config values, adjusted for market regime via ADX
+        (see _get_regime_weights for details). When adx is None, base weights apply.
 
         deduction = risk_penalty × 0.05     (max = 5 points)
 
         final_score = clamp(raw_score - deduction, 0, 100)
 
+    Args:
+        scores: Computed factor scores for the stock.
+        adx:    Current ADX value used to detect trending vs ranging regime.
+                Pass None (or omit) to use base config weights unchanged.
+
     Returns:
         (raw_score: float, final_score: float)
     """
-    weights = config.FACTOR_WEIGHTS
+    weights = _get_regime_weights(adx)
 
     raw_score = (
         scores.trend           * weights["trend"]
@@ -563,7 +624,7 @@ def score_ticker(
 
     # Step 3: Total score (if filters failed, score will be computed but
     # recommendation will be forced to "Avoid")
-    raw_score, final_score = compute_total_score(factor_scores)
+    raw_score, final_score = compute_total_score(factor_scores, daily.adx)
 
     # Step 4: Recommendation
     recommendation = get_recommendation(final_score, filters_passed)

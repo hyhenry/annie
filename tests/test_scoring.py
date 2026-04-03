@@ -51,7 +51,7 @@ from risk import (
     compute_position_size,
     build_trade_plan,
 )
-from taapi_client import RawIndicatorBundle
+from market_data import RawIndicatorBundle
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -576,7 +576,7 @@ class TestMultiTimeframeScore:
 
 class TestFullPipelineSmoke:
     """
-    End-to-end smoke tests using the mock data defined in taapi_client.py.
+    End-to-end smoke tests using the mock data defined in market_data.py.
     These verify the whole pipeline runs without errors and produces
     sensible results for the five pre-defined scenarios.
     """
@@ -591,7 +591,7 @@ class TestFullPipelineSmoke:
 
     def test_aapl_mock_is_buy(self):
         """AAPL mock data represents a strong buy setup — should score >= 80."""
-        from taapi_client import _fetch_mock
+        from market_data import _fetch_mock
         from indicators import parse_indicators
 
         daily_raw = _fetch_mock("AAPL", "1d")
@@ -610,7 +610,7 @@ class TestFullPipelineSmoke:
 
     def test_sndl_mock_is_auto_avoid(self):
         """SNDL mock has price < $5 — must be filtered to Avoid before scoring."""
-        from taapi_client import _fetch_mock
+        from market_data import _fetch_mock
         from indicators import parse_indicators
 
         daily_raw = _fetch_mock("SNDL", "1d")
@@ -623,7 +623,7 @@ class TestFullPipelineSmoke:
 
     def test_amc_mock_is_avoid(self):
         """AMC mock data represents a weak/bearish setup — should be Avoid."""
-        from taapi_client import _fetch_mock
+        from market_data import _fetch_mock
         from indicators import parse_indicators
 
         daily_raw = _fetch_mock("AMC", "1d")
@@ -638,7 +638,7 @@ class TestFullPipelineSmoke:
 
     def test_score_is_bounded(self):
         """All mock tickers must produce scores in 0-100 range."""
-        from taapi_client import _fetch_mock
+        from market_data import _fetch_mock
         from indicators import parse_indicators
 
         for ticker in ["AAPL", "MSFT", "NVDA", "AMC", "SNDL"]:
@@ -651,7 +651,7 @@ class TestFullPipelineSmoke:
 
     def test_trade_plan_generated_for_buy(self):
         """A Buy recommendation should always have a trade plan."""
-        from taapi_client import _fetch_mock
+        from market_data import _fetch_mock
         from indicators import parse_indicators
         from risk import build_trade_plan
 
@@ -667,7 +667,7 @@ class TestFullPipelineSmoke:
 
     def test_explanation_is_non_empty_string(self):
         """Every result must have a non-empty explanation."""
-        from taapi_client import _fetch_mock
+        from market_data import _fetch_mock
         from indicators import parse_indicators
 
         for ticker in ["AAPL", "MSFT", "SNDL"]:
