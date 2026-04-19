@@ -2,6 +2,8 @@
 
 A multifactor swing-trade scoring and portfolio monitoring engine. Fetches market data via **Yahoo Finance** (free, no API key), computes technical indicators locally, and produces Buy/Watch/Avoid scores plus portfolio Hold/Trim/Sell recommendations.
 
+![Annie screenshot](annie.png)
+
 ## Features
 
 - **Scanner** — Score any US stock 0-100 using 7 weighted technical factors (trend, momentum, volume, entry timing, volatility, multi-timeframe, risk penalty). Outputs Buy / Watch / Avoid with a full trade plan (entry, stop-loss, take-profit, position size).
