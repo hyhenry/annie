@@ -35,6 +35,9 @@ build/
 *.db-shm
 *.db-wal
 
+# User data (not committed)
+portfolio.json
+
 # macOS
 .DS_Store
 
