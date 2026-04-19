@@ -38,6 +38,10 @@ build/
 # macOS
 .DS_Store
 
+# Claude Code
+.claude/
+CLAUDE.md
+
 # Streamlit
 .streamlit/secrets.toml
 
