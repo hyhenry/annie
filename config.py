@@ -312,6 +312,9 @@ SELL_RISK_PENALTIES: dict = {
     "extreme_drawdown":        20,  # Drawdown from peak > 20% (replaces high_drawdown)
     "concentration_risk":      15,  # Position > 15% of portfolio
     "mtf_early_warning":       10,  # 4h bearish while daily still bullish
+    "macd_fading":             10,  # MACD histogram positive but lost ≥60% of peak strength (early exit warning)
+    "rsi_rollover":            12,  # RSI was ≥65 within last 10 bars, now <55 — momentum exhaustion
+    "elder_impulse_red":       15,  # EMA13 declining AND MACD histogram declining (Elder Impulse System)
 }
 
 # ── Drawdown Thresholds ────────────────────────────────────────────────────

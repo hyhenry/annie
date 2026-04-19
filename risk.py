@@ -197,10 +197,10 @@ def compute_position_size(
     budget = risk_per_trade_usd if risk_per_trade_usd is not None else config.RISK_PER_TRADE_USD
     risk_per_share = close - stop_loss
 
-    if risk_per_share <= 0:
+    if not (risk_per_share > 0):   # catches NaN, zero, and negative
         logger.warning(
-            "Cannot compute position size: stop_loss (%.2f) >= close (%.2f)",
-            stop_loss, close
+            "Cannot compute position size: risk_per_share=%s (close=%.4g, stop_loss=%.4g)",
+            risk_per_share, close, stop_loss,
         )
         return 0, 0.0
 

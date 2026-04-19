@@ -40,6 +40,7 @@ from indicators import (
     normalize_stochastic,
     normalize_atr_pct,
     normalize_volume_ratio,
+    normalize_52w_proximity,
     compute_obv_score,
     compute_mtf_score,
 )
@@ -82,6 +83,7 @@ class ScoringResult:
     filter_failures: List[str] = field(default_factory=list)
     explanation:     str = ""
     risk_note:       str = ""      # Plain-English risk warning
+    market_regime:   str = "bull"  # "bull", "bear", or "unknown"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -134,13 +136,46 @@ def apply_hard_filters(data: IndicatorData) -> tuple:
 
 def _compute_trend_score(daily: IndicatorData) -> float:
     """
-    Trend score = 60% MA alignment + 40% ADX strength.
+    Trend score = weighted combination of MA alignment, ADX strength, SMA 50
+    position, and 52-week high proximity.
 
-    A strong trend has BOTH a price above its moving averages AND a high ADX.
-    ADX tells us the trend has conviction; MA alignment tells us the direction.
+    When SMA 50 and 52-week high data are available (live mode), all four
+    components are used. In mock mode (data None), falls back to the original
+    two-component formula unchanged — so mock test scores are unaffected.
+
+    Why SMA 50? A stock above its 50-day MA in addition to the 20-day MA is in
+    a more durable uptrend — it's held up through short-term volatility.
+
+    Why 52-week high proximity? George & Hwang (2004) showed stocks near their
+    52-week high significantly outperform — anchoring means supply thins out
+    just above prior highs, so breakouts accelerate.
     """
     ma_score  = normalize_ma_alignment(daily.close, daily.sma_20, daily.ema_20)
     adx_score = normalize_adx(daily.adx)
+
+    # SMA 50 position (live mode only)
+    sma50_score = None
+    if daily.sma_50 is not None and daily.close is not None and daily.sma_50 > 0:
+        pct = (daily.close - daily.sma_50) / daily.sma_50
+        if pct >= 0.05:
+            sma50_score = 100.0
+        elif pct >= 0.0:
+            sma50_score = 65.0 + (pct / 0.05) * 35.0     # 65-100
+        elif pct >= -0.05:
+            sma50_score = 30.0 + ((pct + 0.05) / 0.05) * 35.0   # 30-65
+        else:
+            sma50_score = max(0.0, 30.0 + (pct + 0.05) / 0.10 * 30.0)
+
+    # 52-week high proximity (live mode only)
+    prox_score = normalize_52w_proximity(daily.close, daily.high_52w) if daily.high_52w is not None else None
+
+    if sma50_score is not None and prox_score is not None:
+        return ma_score * 0.35 + adx_score * 0.30 + sma50_score * 0.20 + prox_score * 0.15
+    if sma50_score is not None:
+        return ma_score * 0.45 + adx_score * 0.35 + sma50_score * 0.20
+    if prox_score is not None:
+        return ma_score * 0.50 + adx_score * 0.35 + prox_score * 0.15
+    # Original formula — used in mock mode
     return (ma_score * 0.60) + (adx_score * 0.40)
 
 
@@ -379,24 +414,38 @@ def compute_total_score(scores: FactorScores, adx: Optional[float] = None) -> tu
 # RECOMMENDATION MAPPING
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_recommendation(score: float, filters_passed: bool) -> str:
+def get_recommendation(
+    score: float,
+    filters_passed: bool,
+    market_regime: str = "bull",
+) -> str:
     """
     Map a final score to a recommendation label.
 
     Rules:
         • If any hard filter failed: always "Avoid" regardless of score.
-        • Score >= 80: "Buy"
-        • Score >= 60: "Watch"
-        • Score < 60:  "Avoid"
+        • Bear market: Buy threshold raised +5, Watch threshold raised +3.
+          Buy signals generated in a broad-market downtrend have materially
+          lower hit rates, so we require higher conviction before recommending.
+        • Score >= Buy threshold:   "Buy"
+        • Score >= Watch threshold: "Watch"
+        • Otherwise:                "Avoid"
 
-    The thresholds are configurable in config.RECOMMENDATION_BANDS.
+    The base thresholds are configurable in config.RECOMMENDATION_BANDS.
     """
     if not filters_passed:
         return "Avoid"
 
-    if score >= config.RECOMMENDATION_BANDS["Buy"]:
+    buy_threshold   = config.RECOMMENDATION_BANDS["Buy"]
+    watch_threshold = config.RECOMMENDATION_BANDS["Watch"]
+
+    if market_regime == "bear":
+        buy_threshold   += 5   # 80 → 85
+        watch_threshold += 3   # 60 → 63
+
+    if score >= buy_threshold:
         return "Buy"
-    if score >= config.RECOMMENDATION_BANDS["Watch"]:
+    if score >= watch_threshold:
         return "Watch"
     return "Avoid"
 
@@ -594,6 +643,7 @@ def score_ticker(
     ticker: str,
     daily: IndicatorData,
     h4: Optional[IndicatorData] = None,
+    market_regime: str = "bull",
 ) -> ScoringResult:
     """
     Run the full scoring pipeline for one stock.
@@ -627,7 +677,7 @@ def score_ticker(
     raw_score, final_score = compute_total_score(factor_scores, daily.adx)
 
     # Step 4: Recommendation
-    recommendation = get_recommendation(final_score, filters_passed)
+    recommendation = get_recommendation(final_score, filters_passed, market_regime)
 
     # Step 5: Confidence
     confidence = compute_confidence(daily, factor_scores)
@@ -641,6 +691,7 @@ def score_ticker(
         factor_scores=factor_scores,
         filters_passed=filters_passed,
         filter_failures=filter_failures,
+        market_regime=market_regime,
     )
 
     # Step 6: Explanation

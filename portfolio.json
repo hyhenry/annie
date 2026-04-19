@@ -1,6 +1,6 @@
 {
   "account_size": 5000.0,
-  "last_updated": "2026-03-30T18:12:01",
+  "last_updated": "2026-04-18T20:56:17",
   "holdings": [
     {
       "ticker": "APD",
@@ -10,7 +10,7 @@
       "thesis": "",
       "stop_loss": null,
       "take_profit": null,
-      "peak_price": 291.56,
+      "peak_price": 298.71,
       "trailing_stop_pct": 0.08
     },
     {
@@ -22,6 +22,50 @@
       "stop_loss": null,
       "take_profit": null,
       "peak_price": 184.81,
+      "trailing_stop_pct": 0.08
+    },
+    {
+      "ticker": "BG",
+      "shares": 5.0,
+      "avg_cost": 127.0,
+      "entry_date": "2026-03-31",
+      "thesis": "",
+      "stop_loss": null,
+      "take_profit": null,
+      "peak_price": 129.42,
+      "trailing_stop_pct": 0.08
+    },
+    {
+      "ticker": "T",
+      "shares": 10.0,
+      "avg_cost": 28.0,
+      "entry_date": "2026-03-31",
+      "thesis": "",
+      "stop_loss": null,
+      "take_profit": null,
+      "peak_price": 28.78,
+      "trailing_stop_pct": 0.08
+    },
+    {
+      "ticker": "ZBH",
+      "shares": 5.0,
+      "avg_cost": 91.5,
+      "entry_date": "2026-04-01",
+      "thesis": "",
+      "stop_loss": null,
+      "take_profit": null,
+      "peak_price": 95.34,
+      "trailing_stop_pct": 0.08
+    },
+    {
+      "ticker": "AVB",
+      "shares": 5.0,
+      "avg_cost": 166.4,
+      "entry_date": "2026-04-03",
+      "thesis": "",
+      "stop_loss": null,
+      "take_profit": null,
+      "peak_price": 173.89,
       "trailing_stop_pct": 0.08
     }
   ]

@@ -24,7 +24,8 @@ export function fmtUsd(n: number | null | undefined): string {
   return `${sign}$${abs.toFixed(2)}`
 }
 
-export function fmtScore(n: number): string {
+export function fmtScore(n: number | null | undefined): string {
+  if (n == null) return '—'
   return n.toFixed(1)
 }
 

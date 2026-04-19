@@ -16,6 +16,7 @@ Usage:
 
 import json
 import logging
+import math
 import os
 import sqlite3
 from dataclasses import asdict
@@ -89,13 +90,20 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
 # SERIALISATION
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _sanitize(obj: Any) -> Any:
+    """Recursively replace NaN/Inf floats with None for JSON safety."""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    return obj
+
+
 def _reports_to_dicts(reports) -> List[Dict[str, Any]]:
     """Convert List[StockReport] → list of plain dicts (JSON-safe)."""
-    out = []
-    for r in reports:
-        d = asdict(r)
-        out.append(d)
-    return out
+    return [_sanitize(asdict(r)) for r in reports]
 
 
 def _dicts_to_reports(rows: List[Dict[str, Any]]):
@@ -298,6 +306,29 @@ def get_job(job_id: int) -> Optional[Dict[str, Any]]:
         return None
 
 
+def cleanup_stale_jobs() -> None:
+    """
+    Mark any lingering pending/running jobs as 'error' on server startup.
+    These are orphaned jobs whose worker process died without calling fail_job().
+    """
+    try:
+        if not os.path.exists(DB_PATH):
+            return
+        conn = _connect()
+        _ensure_schema(conn)
+        cur = conn.execute(
+            "UPDATE scan_jobs SET status='error', error='Worker process died', updated_at=? "
+            "WHERE status IN ('pending','running')",
+            (_now(),),
+        )
+        if cur.rowcount:
+            logger.info("Cleaned up %d stale scan job(s)", cur.rowcount)
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        logger.warning("cleanup_stale_jobs() failed: %s", exc)
+
+
 def get_active_job() -> Optional[Dict[str, Any]]:
     """
     Return the most recent job that is still pending or running, or None.
@@ -472,7 +503,7 @@ def save_portfolio_results(reports_dicts: list, mock_mode: bool, analyzed_at: st
         conn.execute("DELETE FROM portfolio_results")
         conn.execute(
             "INSERT INTO portfolio_results (analyzed_at, mock_mode, results) VALUES (?, ?, ?)",
-            (analyzed_at, int(mock_mode), json.dumps(reports_dicts)),
+            (analyzed_at, int(mock_mode), json.dumps(_sanitize(reports_dicts))),
         )
         conn.commit()
         conn.close()

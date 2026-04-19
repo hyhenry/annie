@@ -133,6 +133,16 @@ All tunable parameters live in `config.py`:
 
 Override any value at runtime via environment variables (see `.env.example`).
 
+## Planned Improvements
+
+The following enhancements are designed but not yet implemented:
+
+### Relative Strength (RS) Rating
+IBD-style percentile rank of each stock's 12-month price performance vs the full S&P 500 + NASDAQ 100 universe. Stocks in the top 20% (RS ≥ 80) receive a trend/momentum bonus; bottom 20% receive a penalty. Based on Minervini research showing RS leaders outperform during breakouts. Requires maintaining a universe-wide return table (can be computed alongside the sector scanner) and computing live percentile ranks before each scan run.
+
+### Efficiency Ratio (ER)
+Perry Kaufman's noise-reduction metric: `ER = |net displacement over N bars| / sum of |daily changes|`. ER near 1.0 means the stock is moving efficiently and directionally (high conviction); ER near 0 means choppy/random movement. Planned use: gate entry-timing scores — only award full entry-timing credit when ER > 0.4. Reduces false positives in ranging/whipsaw markets and rewards clean trending moves.
+
 ## Disclaimer
 
 Annie is a personal research and learning tool. Nothing it outputs is financial advice. Always do your own research before making any investment decision.

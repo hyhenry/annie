@@ -14,13 +14,24 @@ Public API:
     refresh_universe()              → pd.DataFrame   force re-download and re-cache
 """
 
+import io
 import logging
 import sqlite3
 import os
+import urllib.request
 from datetime import datetime, timedelta
 from typing import List, Optional
 
 import pandas as pd
+
+_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; Annie/1.0)"}
+
+
+def _read_url(url: str) -> io.BytesIO:
+    """Fetch a URL with a browser-like User-Agent to avoid 403s from Wikipedia."""
+    req = urllib.request.Request(url, headers=_HEADERS)
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return io.BytesIO(resp.read())
 
 logger = logging.getLogger(__name__)
 
@@ -107,8 +118,8 @@ def _write_cache(df: pd.DataFrame) -> None:
         "INSERT INTO universe (ticker, name, sector, industry, source, fetched_at) "
         "VALUES (?, ?, ?, ?, ?, ?)",
         [
-            (row.ticker, row.get("name", ""), row.get("sector", "Unknown"),
-             row.get("industry", "Unknown"), row.get("source", ""), now)
+            (row.ticker, getattr(row, "name", ""), getattr(row, "sector", "Unknown"),
+             getattr(row, "industry", "Unknown"), getattr(row, "source", ""), now)
             for row in df.itertuples(index=False)
         ],
     )
@@ -149,7 +160,7 @@ def _fetch_sp500() -> pd.DataFrame:
     Returns DataFrame with columns: ticker, name, sector, industry, source.
     """
     logger.info("Fetching S&P 500 from Wikipedia…")
-    tables = pd.read_html(_SP500_URL, attrs={"id": "constituents"})
+    tables = pd.read_html(_read_url(_SP500_URL), attrs={"id": "constituents"})
     df = tables[0]
 
     # Column names vary slightly — normalise
@@ -179,12 +190,12 @@ def _fetch_ndx100() -> pd.DataFrame:
     Returns DataFrame with same columns as _fetch_sp500.
     """
     logger.info("Fetching NASDAQ 100 from Wikipedia…")
-    tables = pd.read_html(_NDX100_URL)
+    tables = pd.read_html(_read_url(_NDX100_URL))
 
     # Find the table that has both a ticker-like column and a company name
     target = None
     for t in tables:
-        cols = [c.lower() for c in t.columns]
+        cols = [str(c).lower() for c in t.columns]
         if any("ticker" in c or "symbol" in c for c in cols):
             target = t
             break
@@ -210,8 +221,11 @@ def _fetch_ndx100() -> pd.DataFrame:
             col_map[col] = "name"
         elif "sector" in cl and "sub" not in cl:
             col_map[col] = "sector"
-        elif "industry" in cl or "sub" in cl:
+        elif "sub" in cl:
             col_map[col] = "industry"
+        elif "industry" in cl and col not in col_map:
+            # Map top-level industry to sector (NDX100 uses ICB Industry as the broad grouping)
+            col_map[col] = "sector" if "sector" not in col_map.values() else "industry"
 
     target = target.rename(columns=col_map)
     for needed in ["ticker", "name", "sector", "industry"]:
@@ -239,6 +253,9 @@ def _fetch_from_wikipedia() -> pd.DataFrame:
         logger.error("All Wikipedia fetches failed — using fallback ticker list")
         return _fallback_df()
 
+    # Select only expected columns and reset index before concat
+    _cols = ["ticker", "name", "sector", "industry", "source"]
+    frames = [f[_cols].reset_index(drop=True) for f in frames]
     combined = pd.concat(frames, ignore_index=True)
     # Keep S&P 500 entry when a ticker appears in both (it has richer sector data)
     combined = combined.drop_duplicates(subset="ticker", keep="first")
@@ -284,7 +301,10 @@ def get_universe(force_refresh: bool = False) -> pd.DataFrame:
 
     logger.info("Universe cache missing or stale (age=%s days) — refreshing", age)
     df = _fetch_from_wikipedia()
-    _write_cache(df)
+    try:
+        _write_cache(df)
+    except Exception as exc:
+        logger.warning("Could not write universe cache: %s", exc)
     return df
 
 

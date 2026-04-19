@@ -389,6 +389,42 @@ def compute_sell_risk_score(
     else:
         factors["mtf_early_warning"] = False
 
+    # ── MACD Histogram Fading ─────────────────────────────────────────────
+    # Histogram is still positive but has lost ≥60% of its recent peak
+    # strength — buying momentum is quickly eroding (early exit warning).
+    macd_hist_prev = daily.macd_histogram_prev
+    if (daily_hist is not None and macd_hist_prev is not None
+            and daily_hist > 0 and macd_hist_prev > 0
+            and daily_hist < macd_hist_prev * 0.40):
+        points += penalties["macd_fading"]
+        factors["macd_fading"] = True
+    else:
+        factors["macd_fading"] = False
+
+    # ── RSI Rollover ───────────────────────────────────────────────────────
+    # RSI reached ≥65 within the last 10 bars (recent strength) but has
+    # since pulled back below 55 — classic momentum exhaustion pattern.
+    if (daily.rsi is not None and daily.rsi_10_high is not None
+            and daily.rsi_10_high >= 65.0 and daily.rsi < 55.0):
+        points += penalties["rsi_rollover"]
+        factors["rsi_rollover"] = True
+    else:
+        factors["rsi_rollover"] = False
+
+    # ── Elder Impulse System (Red Bar) ────────────────────────────────────
+    # EMA13 is declining AND MACD histogram is declining — both trend-following
+    # and momentum are bearish simultaneously (Elder Impulse "red bar").
+    ema_13      = daily.ema_13
+    ema_13_prev = daily.ema_13_prev
+    if (ema_13 is not None and ema_13_prev is not None
+            and daily_hist is not None and macd_hist_prev is not None
+            and ema_13 < ema_13_prev
+            and daily_hist < macd_hist_prev):
+        points += penalties["elder_impulse_red"]
+        factors["elder_impulse_red"] = True
+    else:
+        factors["elder_impulse_red"] = False
+
     # ── Final Score ────────────────────────────────────────────────────────
     sell_risk = min(100.0, points)
 
@@ -579,6 +615,23 @@ def generate_hold_explanation(
         sentences.append(
             "The 4-hour chart's MACD has turned negative while the daily chart is still positive — "
             "an early multi-timeframe warning signal."
+        )
+
+    if risk_factors.get("macd_fading") and recommendation in ("Sell", "Trim", "Watch Closely"):
+        sentences.append(
+            "MACD histogram is still positive but has lost over 60% of its recent peak strength — "
+            "buying momentum is quickly eroding."
+        )
+
+    if risk_factors.get("rsi_rollover"):
+        sentences.append(
+            "RSI reached a high recently but has since rolled below 55 — a classic momentum exhaustion signal."
+        )
+
+    if risk_factors.get("elder_impulse_red"):
+        sentences.append(
+            "Elder Impulse System shows a red bar: EMA13 is declining and MACD histogram is weakening — "
+            "both trend and momentum are turning bearish simultaneously."
         )
 
     return " ".join(sentences)

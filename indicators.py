@@ -82,6 +82,17 @@ class IndicatorData:
     # None when volume_sma_20 is unavailable (e.g. mock mode).
     volume_ratio: Optional[float] = None
 
+    # ── Enhancement fields (live mode only; None in mock) ──────────────────
+    sma_50:              Optional[float] = None   # 50-period SMA
+    price_above_sma50:   Optional[bool]  = None   # close > sma_50
+    high_52w:            Optional[float] = None   # 52-week rolling high
+    cmf:                 Optional[float] = None   # Chaikin Money Flow (-1 to 1)
+    up_down_vol_ratio:   Optional[float] = None   # up-day vol / total vol, 10 bars
+    ema_13:              Optional[float] = None   # 13-period EMA (Elder Impulse)
+    ema_13_prev:         Optional[float] = None   # EMA 13 three bars ago
+    macd_histogram_prev: Optional[float] = None   # MACD histogram three bars ago
+    rsi_10_high:         Optional[float] = None   # max RSI over prior 10 bars
+
     # Fraction of critical indicators that returned data (0.0 to 1.0)
     # Used to compute the confidence score.
     data_completeness: float = 0.0
@@ -164,6 +175,19 @@ def parse_indicators(raw: RawIndicatorBundle) -> IndicatorData:
     if (raw.volume is not None and raw.volume_sma_20 is not None
             and raw.volume_sma_20 > 0):
         data.volume_ratio = raw.volume / raw.volume_sma_20
+
+    # ── Enhancement fields (copied directly from bundle) ──────────────────
+    data.sma_50              = raw.sma_50
+    data.high_52w            = raw.high_52w
+    data.cmf                 = raw.cmf
+    data.up_down_vol_ratio   = raw.up_down_vol_ratio
+    data.ema_13              = raw.ema_13
+    data.ema_13_prev         = raw.ema_13_prev
+    data.macd_histogram_prev = raw.macd_histogram_prev
+    data.rsi_10_high         = raw.rsi_10_high
+
+    if data.close is not None and data.sma_50 is not None:
+        data.price_above_sma50 = data.close > data.sma_50
 
     # ── Derived: Bollinger Band position (0.0 to 1.0+) ────────────────────
     if (data.bbands is not None
@@ -578,6 +602,118 @@ def normalize_volume_ratio(ratio: Optional[float]) -> float:
     return max(0.0, ratio / 0.5 * 20.0)
 
 
+def normalize_52w_proximity(
+    close: Optional[float],
+    high_52w: Optional[float],
+) -> float:
+    """
+    52-week high proximity → 0-100 entry quality score.
+
+    Stocks trading near their 52-week high tend to outperform (George & Hwang
+    2004). The anchoring effect: sellers mentally anchor offers near the prior
+    high, so supply thins out just above it — small buying causes disproportionate
+    moves once the level is cleared.
+
+    Plain English: A stock near its 52-week high is like a spring compressed
+    to its tightest point. A stock 40% below its high has a lot of overhead
+    supply (people waiting to break even) before it can run.
+
+    Scoring:
+        ≥ 95% of 52w high: approaching breakout zone → 90-100
+        85-95%:            upper range, strong structure → 60-90
+        70-85%:            mid-range                    → 30-60
+        < 70%:             far below high, weak structure → 0-30
+    """
+    if close is None or high_52w is None or high_52w <= 0:
+        return 50.0
+
+    proximity = min(1.0, close / high_52w)   # cap at 1.0
+
+    if proximity >= 0.95:
+        return 90.0 + (proximity - 0.95) / 0.05 * 10.0   # 90-100
+
+    if proximity >= 0.85:
+        return 60.0 + (proximity - 0.85) / 0.10 * 30.0   # 60-90
+
+    if proximity >= 0.70:
+        return 30.0 + (proximity - 0.70) / 0.15 * 30.0   # 30-60
+
+    return max(0.0, proximity / 0.70 * 30.0)              # 0-30
+
+
+def normalize_cmf(cmf: Optional[float]) -> float:
+    """
+    Chaikin Money Flow → 0-100 volume direction score.
+
+    CMF measures net buying/selling pressure using intra-bar position weighted
+    by volume over 20 periods. CMF > 0 = net accumulation (buyers dominant),
+    CMF < 0 = net distribution (sellers dominant).
+
+    Unlike raw volume ratio (which measures quantity), CMF measures DIRECTION
+    of volume pressure — a much more informative signal.
+
+    Plain English: If a stock closes near the top of its daily range on heavy
+    volume repeatedly, CMF rises. If it closes near the bottom every day,
+    institutions are quietly selling into any strength.
+
+    Scoring:
+        ≥  0.25: strong accumulation → 90-100
+         0.10 to 0.25: moderate accumulation → 70-90
+        -0.10 to 0.10: neutral → 40-60
+        -0.25 to -0.10: moderate distribution → 20-40
+        ≤ -0.25: strong distribution → 0-20
+    """
+    if cmf is None:
+        return 50.0
+
+    if cmf >= 0.25:
+        return min(100.0, 90.0 + (cmf - 0.25) / 0.25 * 10.0)
+
+    if cmf >= 0.10:
+        return 70.0 + (cmf - 0.10) / 0.15 * 20.0
+
+    if cmf >= -0.10:
+        return 40.0 + (cmf + 0.10) / 0.20 * 20.0   # 40-60 through zero
+
+    if cmf >= -0.25:
+        return 20.0 + (cmf + 0.25) / 0.15 * 20.0
+
+    return max(0.0, (cmf + 0.50) / 0.25 * 20.0)
+
+
+def normalize_up_down_vol_ratio(ratio: Optional[float]) -> float:
+    """
+    Up/down volume ratio (up-day volume / total 10-day volume) → 0-100 score.
+
+    Measures accumulation vs distribution over 10 bars by comparing volume on
+    up-close days to total volume. Ratio > 0.60 = most volume on up days =
+    accumulation. Ratio < 0.40 = most volume on down days = distribution.
+
+    Plain English: If 70% of the last 10 days' volume happened on days when
+    the stock closed higher, buyers are in control. If 70% happened on down
+    days, sellers are quietly unloading.
+
+    Scoring:
+        ≥ 0.60: clear accumulation → 80-100
+        0.50-0.60: slight accumulation bias → 60-80
+        0.40-0.50: slight distribution bias → 40-60
+        < 0.40: clear distribution → 0-40
+    """
+    if ratio is None:
+        return 50.0
+
+    if ratio >= 0.60:
+        return min(100.0, 80.0 + (ratio - 0.60) / 0.20 * 20.0)
+
+    if ratio >= 0.50:
+        return 60.0 + (ratio - 0.50) / 0.10 * 20.0
+
+    if ratio >= 0.40:
+        return 40.0 + (ratio - 0.40) / 0.10 * 20.0
+
+    return max(0.0, ratio / 0.40 * 40.0)
+
+
 def compute_obv_score(
     daily: "IndicatorData",
     h4: Optional["IndicatorData"] = None,
@@ -604,15 +740,23 @@ def compute_obv_score(
 
     score = 50.0  # start at neutral
 
-    # ── PRIMARY: volume trend ─────────────────────────────────────────────
-    if daily.volume_ratio is not None:
-        # Actual volume-vs-MA ratio available (live yfinance data).
-        # Map normalize_volume_ratio (0-100) to a ±25 contribution.
-        vol_score = normalize_volume_ratio(daily.volume_ratio)
-        score += (vol_score - 50.0) * 0.5   # 0→-25, 50→0, 100→+25
-    elif daily.obv is not None:
-        # Fallback: OBV absolute sign (crude proxy, used in mock mode).
-        score += 15.0 if daily.obv > 0 else -15.0
+    # ── PRIMARY: volume direction + trend ────────────────────────────────
+    if daily.cmf is not None and daily.volume_ratio is not None:
+        # Best case: CMF (direction) + volume ratio (quantity) blended.
+        direction_score = normalize_cmf(daily.cmf) * 0.60 + normalize_volume_ratio(daily.volume_ratio) * 0.40
+    elif daily.cmf is not None:
+        direction_score = normalize_cmf(daily.cmf)
+    elif daily.volume_ratio is not None:
+        direction_score = normalize_volume_ratio(daily.volume_ratio)
+    else:
+        # Fallback: OBV sign (mock mode).
+        direction_score = (65.0 if (daily.obv or 0) > 0 else 35.0) if daily.obv is not None else 50.0
+    score += (direction_score - 50.0) * 0.5   # 0→-25, 50→0, 100→+25
+
+    # Up/down volume ratio — additional accumulation/distribution confirmation
+    if daily.up_down_vol_ratio is not None:
+        udv_score = normalize_up_down_vol_ratio(daily.up_down_vol_ratio)
+        score += (udv_score - 50.0) * 0.2     # 0→-10, 50→0, 100→+10
 
     # ── SECONDARY: price vs moving averages ───────────────────────────────
     if daily.price_above_sma is True and daily.price_above_ema is True:

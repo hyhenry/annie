@@ -13,6 +13,7 @@ Run (production):
 
 import json
 import logging
+import math
 import pathlib
 import subprocess
 import sys
@@ -35,6 +36,7 @@ import config
 from db import (
     get_job,
     get_active_job,
+    cleanup_stale_jobs,
     cancel_job,
     create_scan_job,
     load_latest_scan,
@@ -53,6 +55,12 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Annie API", version="1.0")
 
+
+@app.on_event("startup")
+def on_startup() -> None:
+    cleanup_stale_jobs()
+
+
 # Allow the Vite dev server to call the API without CORS issues
 app.add_middleware(
     CORSMiddleware,
@@ -67,10 +75,21 @@ app.add_middleware(
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _sanitize(obj: Any) -> Any:
+    """Recursively replace NaN/Inf floats with None for JSON safety."""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    return obj
+
+
 def _to_dict(obj) -> Any:
-    """Recursively convert dataclass instances to dicts."""
+    """Recursively convert dataclass instances to dicts, sanitizing floats."""
     if hasattr(obj, "__dataclass_fields__"):
-        return asdict(obj)
+        return _sanitize(asdict(obj))
     return obj
 
 
@@ -95,7 +114,7 @@ def _job_response(job: dict) -> dict:
         "error":          job["error"],
         "created_at":     job["created_at"],
         "updated_at":     job["updated_at"],
-        "partial_results": [asdict(r) for r in (job["partial_results"] or [])],
+        "partial_results": [_sanitize(asdict(r)) for r in (job["partial_results"] or [])],
     }
 
 
@@ -178,7 +197,7 @@ def get_portfolio():
     portfolio = load_portfolio(config.PORTFOLIO_FILE)
     return {
         "account_size": portfolio.account_size,
-        "holdings":     [asdict(h) for h in portfolio.holdings],
+        "holdings":     [_sanitize(asdict(h)) for h in portfolio.holdings],
     }
 
 
@@ -216,7 +235,7 @@ def analyze_portfolio(mock_mode: Optional[bool] = None):
         reports = monitor_portfolio(portfolio, update_peaks=True)
         save_portfolio(portfolio, config.PORTFOLIO_FILE)   # persist updated peaks
 
-        reports_dicts = [asdict(r) for r in reports]
+        reports_dicts = [_sanitize(asdict(r)) for r in reports]
         analyzed_at = reports[0].analysed_at if reports else None
         save_portfolio_results(reports_dicts, config.MOCK_MODE, analyzed_at)
 
@@ -258,7 +277,7 @@ def get_latest_scan():
         return None
     return {
         "meta":    data["meta"],
-        "reports": [asdict(r) for r in data["reports"]],
+        "reports": [_sanitize(asdict(r)) for r in data["reports"]],
     }
 
 
@@ -269,7 +288,7 @@ def get_scan(scan_id: int):
         raise HTTPException(status_code=404, detail="Scan not found")
     return {
         "meta":    data["meta"],
-        "reports": [asdict(r) for r in data["reports"]],
+        "reports": [_sanitize(asdict(r)) for r in data["reports"]],
     }
 
 

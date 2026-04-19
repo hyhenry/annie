@@ -62,6 +62,16 @@ class RawIndicatorBundle:
     volume:         Optional[float] = None
     volume_sma_20:  Optional[float] = None   # 20-period SMA of volume (for volume_ratio)
 
+    # ── Enhancement fields (populated in live mode; None in mock/fallback) ─
+    sma_50:              Optional[float] = None   # 50-period SMA
+    high_52w:            Optional[float] = None   # 252-bar rolling max of highs (52-week high)
+    cmf:                 Optional[float] = None   # 20-period Chaikin Money Flow (-1 to 1)
+    up_down_vol_ratio:   Optional[float] = None   # up-day vol / total vol over 10 bars (0-1)
+    ema_13:              Optional[float] = None   # 13-period EMA (Elder Impulse System)
+    ema_13_prev:         Optional[float] = None   # EMA 13 from 3 bars ago
+    macd_histogram_prev: Optional[float] = None   # MACD histogram 3 bars ago (fading/Elder)
+    rsi_10_high:         Optional[float] = None   # max RSI over prior 10 bars (rollover detect)
+
     fetch_errors:   List[str] = field(default_factory=list)
 
 
@@ -361,29 +371,51 @@ def _fetch_yfinance(ticker: str, interval: str) -> RawIndicatorBundle:
         bundle.close  = float(close.iloc[-1])
         bundle.volume = float(volume.iloc[-1])
 
-        bundle.rsi = _last(_ta.momentum.RSIIndicator(close, window=14).rsi())
+        # ── RSI — save series for historical lookback ─────────────────────
+        rsi_series = _ta.momentum.RSIIndicator(close, window=14).rsi()
+        bundle.rsi = _last(rsi_series)
         if bundle.rsi is None:
             bundle.fetch_errors.append("rsi")
+        rsi_clean = rsi_series.dropna()
+        if len(rsi_clean) >= 11:
+            bundle.rsi_10_high = float(rsi_clean.iloc[-11:-1].max())
 
-        macd = _ta.trend.MACD(close, window_slow=26, window_fast=12, window_sign=9)
-        bundle.macd_value     = _last(macd.macd())
-        bundle.macd_signal    = _last(macd.macd_signal())
-        bundle.macd_histogram = _last(macd.macd_diff())
+        # ── MACD — save series for histogram history ───────────────────────
+        macd_ind = _ta.trend.MACD(close, window_slow=26, window_fast=12, window_sign=9)
+        macd_diff_series = macd_ind.macd_diff()
+        bundle.macd_value     = _last(macd_ind.macd())
+        bundle.macd_signal    = _last(macd_ind.macd_signal())
+        bundle.macd_histogram = _last(macd_diff_series)
         if bundle.macd_value is None:
             bundle.fetch_errors.append("macd")
+        diff_clean = macd_diff_series.dropna()
+        if len(diff_clean) >= 4:
+            bundle.macd_histogram_prev = float(diff_clean.iloc[-4])
 
+        # ── Moving averages ───────────────────────────────────────────────
         bundle.sma_20 = _last(_ta.trend.SMAIndicator(close, window=20).sma_indicator())
         bundle.ema_20 = _last(_ta.trend.EMAIndicator(close, window=20).ema_indicator())
+        bundle.sma_50 = _last(_ta.trend.SMAIndicator(close, window=50).sma_indicator())
 
+        # ── EMA 13 — Elder Impulse System ─────────────────────────────────
+        ema13_series = _ta.trend.EMAIndicator(close, window=13).ema_indicator()
+        bundle.ema_13 = _last(ema13_series)
+        ema13_clean = ema13_series.dropna()
+        if len(ema13_clean) >= 4:
+            bundle.ema_13_prev = float(ema13_clean.iloc[-4])
+
+        # ── Bollinger Bands ───────────────────────────────────────────────
         bb = _ta.volatility.BollingerBands(close, window=20, window_dev=2)
         bundle.bb_upper  = _last(bb.bollinger_hband())
         bundle.bb_middle = _last(bb.bollinger_mavg())
         bundle.bb_lower  = _last(bb.bollinger_lband())
 
+        # ── Stochastic ────────────────────────────────────────────────────
         stoch = _ta.momentum.StochasticOscillator(high, low, close, window=14, smooth_window=3)
         bundle.stoch_k = _last(stoch.stoch())
         bundle.stoch_d = _last(stoch.stoch_signal())
 
+        # ── ATR / ADX ─────────────────────────────────────────────────────
         bundle.atr = _last(_ta.volatility.AverageTrueRange(high, low, close, window=14).average_true_range())
         if bundle.atr is None:
             bundle.fetch_errors.append("atr")
@@ -392,9 +424,25 @@ def _fetch_yfinance(ticker: str, interval: str) -> RawIndicatorBundle:
         if bundle.adx is None:
             bundle.fetch_errors.append("adx")
 
+        # ── Volume indicators ──────────────────────────────────────────────
         bundle.obv = _last(_ta.volume.OnBalanceVolumeIndicator(close, volume).on_balance_volume())
-
         bundle.volume_sma_20 = _last(_ta.trend.SMAIndicator(volume.astype(float), window=20).sma_indicator())
+        bundle.cmf = _last(_ta.volume.ChaikinMoneyFlowIndicator(high, low, close, volume, window=20).chaikin_money_flow())
+
+        # Up/down volume ratio over last 10 bars
+        if len(hist) >= 11:
+            last_10 = hist.iloc[-10:]
+            prev_close = hist["close"].iloc[-11:-1]
+            up_mask = last_10["close"].values > prev_close.values
+            total_vol = float(last_10["volume"].sum())
+            if total_vol > 0:
+                up_vol = float(last_10["volume"].values[up_mask].sum())
+                bundle.up_down_vol_ratio = up_vol / total_vol
+
+        # ── 52-week high ─────────────────────────────────────────────────
+        lookback = min(252, len(hist))
+        if lookback >= 20:
+            bundle.high_52w = float(high.iloc[-lookback:].max())
 
         logger.debug(
             "yfinance %s/%s: close=%.2f rsi=%.1f atr=%.2f adx=%.1f bars=%d",
@@ -409,6 +457,62 @@ def _fetch_yfinance(ticker: str, interval: str) -> RawIndicatorBundle:
         bundle.fetch_errors.append("yfinance_error")
 
     return bundle
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MARKET REGIME
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SPY_REGIME_CACHE: Optional[str] = None
+
+
+def fetch_spy_regime() -> str:
+    """
+    Return the current broad-market regime based on SPY vs its 200-day SMA.
+
+    Returns 'bull', 'bear', or 'unknown'. Result is cached for the process
+    lifetime so that all tickers in one scan run share the same reading
+    without repeated network calls.
+
+    In mock mode always returns 'bull' (no network call).
+
+    Why it matters: Buy signals generated during a broad market downtrend
+    have significantly lower hit rates. Raising the Buy threshold in a bear
+    market reduces false positives without changing the score itself.
+    """
+    global _SPY_REGIME_CACHE
+    if _SPY_REGIME_CACHE is not None:
+        return _SPY_REGIME_CACHE
+
+    if config.MOCK_MODE:
+        _SPY_REGIME_CACHE = "bull"
+        return _SPY_REGIME_CACHE
+
+    if not _YFINANCE_AVAILABLE:
+        _SPY_REGIME_CACHE = "unknown"
+        return _SPY_REGIME_CACHE
+
+    try:
+        hist = _yf.Ticker("SPY").history(period="1y", interval="1d", auto_adjust=True)
+        if hist is None or hist.empty:
+            _SPY_REGIME_CACHE = "unknown"
+            return _SPY_REGIME_CACHE
+
+        hist.columns = [c.lower() for c in hist.columns]
+        close = hist["close"]
+        sma_200 = close.rolling(200).mean().iloc[-1]
+        spy_close = float(close.iloc[-1])
+
+        _SPY_REGIME_CACHE = "bull" if spy_close > float(sma_200) else "bear"
+        logger.info(
+            "Market regime: %s (SPY=%.2f, SMA200=%.2f)",
+            _SPY_REGIME_CACHE, spy_close, float(sma_200),
+        )
+    except Exception as exc:
+        logger.warning("Could not determine market regime: %s", exc)
+        _SPY_REGIME_CACHE = "unknown"
+
+    return _SPY_REGIME_CACHE
 
 
 # ─────────────────────────────────────────────────────────────────────────────

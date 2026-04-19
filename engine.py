@@ -23,7 +23,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Any, Dict, List, Optional
 
 import config
-from market_data import fetch_indicators
+from market_data import fetch_indicators, fetch_spy_regime
 from indicators import parse_indicators, IndicatorData
 from scoring import score_ticker, ScoringResult
 from risk import build_trade_plan, TradePlan
@@ -128,6 +128,7 @@ def analyze_ticker(
     ticker: str,
     primary_interval: str = None,
     secondary_interval: str = None,
+    market_regime: str = "bull",
 ) -> StockReport:
     """
     Run the full analysis pipeline for one stock ticker.
@@ -171,7 +172,7 @@ def analyze_ticker(
         h4    = parse_indicators(h4_raw)
 
         # ── Step 4: Score ─────────────────────────────────────────────────
-        result = score_ticker(ticker, daily, h4)
+        result = score_ticker(ticker, daily, h4, market_regime=market_regime)
 
         # ── Step 5: Trade plan ────────────────────────────────────────────
         plan = build_trade_plan(daily, result.final_score, result.filters_passed)
@@ -260,13 +261,17 @@ def run_engine(
         secondary_interval or config.INTERVALS["secondary"],
     )
 
+    # Fetch market regime once per run (cached within the process)
+    market_regime = fetch_spy_regime()
+    logger.info("Market regime: %s", market_regime)
+
     reports: List[StockReport] = []
 
     for i, ticker in enumerate(tickers, 1):
         if verbose:
             logger.info("[%d/%d] Processing %s ...", i, len(tickers), ticker)
 
-        report = analyze_ticker(ticker, primary_interval, secondary_interval)
+        report = analyze_ticker(ticker, primary_interval, secondary_interval, market_regime)
         reports.append(report)
 
         if verbose:
